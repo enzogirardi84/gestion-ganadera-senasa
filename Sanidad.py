@@ -12,8 +12,27 @@ import hashlib
 import io
 import csv
 
+# Configuracion - cambiar a False para usar Supabase
+USAR_SUPABASE = False  # = True cuando configures exec_sql en Supabase
+
+SUPABASE_URL = "https://tfdgaxowacbxqtuvhhdp.supabase.co"
+SUPABASE_KEY = os.environ.get("SUPABASE_ANON_KEY", "sb_publishable_cFT_GCvgpBWWtR14HcNvaQ_Q0EH-Paf")
+SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
+
 DB_NAME = 'gestion_bovinos_senasa.db'
 BACKUP_DIR = 'backups'
+
+if USAR_SUPABASE:
+    try:
+        from supabase import create_client
+        _supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+        st.cache_data.clear()
+    except:
+        st.error("Error conectando a Supabase. Usando SQLite local.")
+        USAR_SUPABASE = False
+        _supabase = None
+else:
+    _supabase = None
 
 def init_db():
     with sqlite3.connect(DB_NAME) as conn:
@@ -435,15 +454,29 @@ except:
 
 def run_query(query, params=()):
     try:
-        with sqlite3.connect(DB_NAME) as conn:
-            c = conn.cursor()
-            c.execute(query, params)
-            conn.commit()
+        if USAR_SUPABASE and _supabase:
+            _supabase.rpc("exec_sql", {"sql_text": query}).execute()
             return True
+        else:
+            with sqlite3.connect(DB_NAME) as conn:
+                c = conn.cursor()
+                c.execute(query, params)
+                conn.commit()
+                return True
     except sqlite3.IntegrityError:
+        return False
+    except Exception as e:
         return False
 
 def fetch_data(query, params=()):
+    if USAR_SUPABASE and _supabase:
+        try:
+            result = _supabase.rpc("exec_sql", {"sql_text": query}).execute()
+            if result.data:
+                return pd.DataFrame(result.data)
+            return pd.DataFrame()
+        except:
+            pass
     with sqlite3.connect(DB_NAME) as conn:
         df = pd.read_sql_query(query, conn, params=params)
     return df
