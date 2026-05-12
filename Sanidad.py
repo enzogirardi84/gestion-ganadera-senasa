@@ -13,7 +13,7 @@ import io
 import csv
 
 # Configuracion - cambiar a False para usar Supabase
-USAR_SUPABASE = False  # = True cuando configures exec_sql en Supabase
+USAR_SUPABASE = False  # False = SQLite local/cloud | True = Supabase cloud
 
 SUPABASE_URL = "https://tfdgaxowacbxqtuvhhdp.supabase.co"
 SUPABASE_KEY = os.environ.get("SUPABASE_ANON_KEY", "sb_publishable_cFT_GCvgpBWWtR14HcNvaQ_Q0EH-Paf")
@@ -445,6 +445,12 @@ if not os.path.exists(BACKUP_DIR):
     os.makedirs(BACKUP_DIR)
 
 init_db()
+
+# Crear usuario admin por defecto si no existe
+try:
+    run_query("INSERT OR IGNORE INTO usuarios (username, password_hash, nombre, rol) VALUES ('admin', '240be518fabd2724ddb6f04eeb1da5967448d7e831c08c8fa822809f74c720a9', 'Administrador', 'Administrador')")
+except:
+    pass
 
 # Migraciones: agregar columnas faltantes a tablas existentes
 try:
