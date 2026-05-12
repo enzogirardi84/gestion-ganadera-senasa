@@ -431,8 +431,10 @@ def init_db():
         ''')
         conn.commit()
 
-if not os.path.exists(BACKUP_DIR):
-    os.makedirs(BACKUP_DIR)
+try:
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+except:
+    pass
 
 init_db()
 
