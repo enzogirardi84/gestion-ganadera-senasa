@@ -34,6 +34,8 @@ TABLAS_EXPORTABLES = [
     "bovinos", "sanidad", "reproduccion", "pesajes", "propietarios",
     "farmacia", "stock", "certificados", "intervenciones", "finanzas",
     "lotes", "agenda", "facturacion", "recetas", "alertas",
+    "ehr_templates", "ehr_template_items", "workflow_pacientes", "workflow_tareas",
+    "ordenes_compra", "automation_log",
 ]
 
 _supabase = None
@@ -206,6 +208,8 @@ def init_db():
                 precio_compra REAL DEFAULT 0,
                 precio_venta REAL DEFAULT 0,
                 ubicacion TEXT,
+                stock_minimo INTEGER DEFAULT 0,
+                proveedor_predeterminado TEXT,
                 FOREIGN KEY(producto_id) REFERENCES farmacia(id)
             )
         ''')
@@ -279,7 +283,39 @@ def init_db():
                 tratamiento TEXT,
                 observaciones TEXT,
                 veterinario TEXT,
+                subjetivo TEXT,
+                objetivo TEXT,
+                analisis TEXT,
+                plan TEXT,
+                template_id INTEGER,
                 FOREIGN KEY(caravana) REFERENCES bovinos(caravana)
+            )
+        ''')
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS ehr_templates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                nombre TEXT UNIQUE,
+                motivo TEXT,
+                subjetivo TEXT,
+                objetivo TEXT,
+                analisis TEXT,
+                plan TEXT,
+                activo INTEGER DEFAULT 1
+            )
+        ''')
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS ehr_template_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                template_id INTEGER,
+                concepto TEXT,
+                cantidad REAL DEFAULT 1,
+                precio_unitario REAL DEFAULT 0,
+                producto_id INTEGER,
+                stock_cantidad INTEGER DEFAULT 0,
+                recordatorio_meses INTEGER DEFAULT 0,
+                recordatorio_mensaje TEXT,
+                FOREIGN KEY(template_id) REFERENCES ehr_templates(id),
+                FOREIGN KEY(producto_id) REFERENCES farmacia(id)
             )
         ''')
         c.execute('''
@@ -405,6 +441,52 @@ def init_db():
                 canal TEXT DEFAULT 'WhatsApp',
                 enviado INTEGER DEFAULT 0,
                 FOREIGN KEY(propietario_id) REFERENCES propietarios(id)
+            )
+        ''')
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS workflow_pacientes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                caravana TEXT UNIQUE,
+                estado TEXT DEFAULT 'Espera',
+                responsable TEXT,
+                prioridad TEXT DEFAULT 'Normal',
+                actualizado_en DATETIME DEFAULT CURRENT_TIMESTAMP,
+                observaciones TEXT,
+                FOREIGN KEY(caravana) REFERENCES bovinos(caravana)
+            )
+        ''')
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS workflow_tareas (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                caravana TEXT,
+                tarea TEXT,
+                asignado_a TEXT,
+                vence_en DATETIME,
+                estado TEXT DEFAULT 'Pendiente',
+                creado_en DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(caravana) REFERENCES bovinos(caravana)
+            )
+        ''')
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS ordenes_compra (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                producto_id INTEGER,
+                proveedor TEXT,
+                cantidad_sugerida INTEGER,
+                motivo TEXT,
+                estado TEXT DEFAULT 'Borrador',
+                fecha_creacion DATE DEFAULT (DATE('now')),
+                FOREIGN KEY(producto_id) REFERENCES farmacia(id)
+            )
+        ''')
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS automation_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                evento TEXT,
+                entidad TEXT,
+                entidad_id INTEGER,
+                detalle TEXT,
+                creado_en DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         c.execute('''
@@ -666,6 +748,142 @@ def verificar_alertas():
             "Sistema",
             f"{row['nombre_producto']} lote {row['lote']} vence en {dias} dias",
         )
+
+def log_automatizacion(evento, entidad, entidad_id, detalle):
+    run_query(
+        "INSERT INTO automation_log (evento, entidad, entidad_id, detalle) VALUES (?, ?, ?, ?)",
+        (evento, entidad, entidad_id, detalle),
+    )
+
+def sembrar_templates_ehr():
+    templates = [
+        {
+            "nombre": "Vacunacion anual",
+            "motivo": "Control preventivo y aplicacion de vacuna anual.",
+            "subjetivo": "Propietario refiere animal sin signos clinicos relevantes.",
+            "objetivo": "Examen general sin hallazgos de alarma. Temperatura y condicion corporal dentro de parametros esperados.",
+            "analisis": "Paciente apto para vacunacion preventiva.",
+            "plan": "Aplicar vacuna indicada. Controlar reaccion local. Programar recordatorio preventivo.",
+            "items": [("Vacuna anual", 1, 0, 0, 11, "Recordatorio de revacunacion anual")],
+        },
+        {
+            "nombre": "Consulta general",
+            "motivo": "Consulta clinica general.",
+            "subjetivo": "Motivo referido por el propietario.",
+            "objetivo": "Examen fisico completo: actitud, mucosas, hidratacion, temperatura, auscultacion y palpacion.",
+            "analisis": "Diagnostico presuntivo segun signos clinicos.",
+            "plan": "Indicar tratamiento, controles y pautas de alarma.",
+            "items": [("Consulta veterinaria", 1, 0, 0, 0, "")],
+        },
+        {
+            "nombre": "Control reproductivo",
+            "motivo": "Evaluacion reproductiva.",
+            "subjetivo": "Antecedentes reproductivos y observaciones del establecimiento.",
+            "objetivo": "Evaluacion clinica/reproductiva segun protocolo.",
+            "analisis": "Estado reproductivo a confirmar o controlar.",
+            "plan": "Registrar hallazgos, indicar seguimiento y proxima revision.",
+            "items": [("Control reproductivo", 1, 0, 0, 1, "Seguimiento reproductivo")],
+        },
+    ]
+    for tpl in templates:
+        ok = run_query(
+            "INSERT OR IGNORE INTO ehr_templates (nombre, motivo, subjetivo, objetivo, analisis, plan) VALUES (?, ?, ?, ?, ?, ?)",
+            (tpl["nombre"], tpl["motivo"], tpl["subjetivo"], tpl["objetivo"], tpl["analisis"], tpl["plan"]),
+        )
+        df = fetch_data("SELECT id FROM ehr_templates WHERE nombre = ?", (tpl["nombre"],))
+        if df.empty:
+            continue
+        template_id = int(df["id"].iloc[0])
+        existing = fetch_data("SELECT COUNT(*) as total FROM ehr_template_items WHERE template_id = ?", (template_id,))
+        if int(existing["total"].iloc[0] or 0) == 0:
+            for item in tpl["items"]:
+                run_query(
+                    """
+                    INSERT INTO ehr_template_items
+                    (template_id, concepto, cantidad, precio_unitario, stock_cantidad, recordatorio_meses, recordatorio_mensaje)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (template_id, item[0], item[1], item[2], item[3], item[4], item[5]),
+                )
+
+def obtener_propietario_animal(caravana):
+    df = fetch_data("SELECT propietario_id FROM bovinos WHERE caravana = ?", (caravana,))
+    if df.empty or pd.isna(df["propietario_id"].iloc[0]):
+        return None
+    return int(df["propietario_id"].iloc[0])
+
+def aplicar_automatizaciones_consulta(consulta_id, caravana, template_id):
+    if not template_id:
+        return
+    items = fetch_data("SELECT * FROM ehr_template_items WHERE template_id = ?", (template_id,))
+    if items.empty:
+        return
+    propietario_id = obtener_propietario_animal(caravana)
+    facturables = items[items["precio_unitario"].fillna(0) > 0]
+    if propietario_id and not facturables.empty:
+        subtotal = float((facturables["cantidad"].astype(float) * facturables["precio_unitario"].astype(float)).sum())
+        iva = subtotal * 0.21
+        factura_id = run_insert_return_id(
+            """
+            INSERT INTO facturacion
+            (numero_factura, propietario_id, tipo_comprobante, descripcion, subtotal, iva, total, metodo_pago, observaciones)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (f"AUTO-{consulta_id}", propietario_id, "Presupuesto", f"Auto-billing consulta {caravana}", subtotal, iva, subtotal + iva, "Cuenta corriente", "Generado automaticamente desde historia clinica"),
+        )
+        if factura_id:
+            for _, item in facturables.iterrows():
+                cantidad = float(item["cantidad"] or 1)
+                precio = float(item["precio_unitario"] or 0)
+                run_query(
+                    "INSERT INTO factura_detalle (factura_id, concepto, cantidad, precio_unitario, subtotal) VALUES (?, ?, ?, ?, ?)",
+                    (factura_id, item["concepto"], cantidad, precio, cantidad * precio),
+                )
+            log_automatizacion("auto_billing", "historia_clinica", consulta_id, f"Factura borrador AUTO-{consulta_id} generada")
+
+    for _, item in items.iterrows():
+        producto_id = item.get("producto_id")
+        stock_cantidad = int(item.get("stock_cantidad") or 0)
+        if pd.notna(producto_id) and int(producto_id) > 0 and stock_cantidad > 0:
+            run_query(
+                "UPDATE stock SET cantidad = MAX(cantidad - ?, 0) WHERE producto_id = ?",
+                (stock_cantidad, int(producto_id)),
+            )
+            log_automatizacion("stock_descuento", "historia_clinica", consulta_id, f"Stock descontado: {item['concepto']}")
+
+        meses = int(item.get("recordatorio_meses") or 0)
+        if propietario_id and meses > 0:
+            mensaje = item.get("recordatorio_mensaje") or f"Seguimiento: {item['concepto']}"
+            fecha = (date.today() + relativedelta(months=meses)).isoformat()
+            run_query(
+                "INSERT INTO recordatorios (propietario_id, caravana, tipo_recordatorio, fecha_programada, mensaje, canal) VALUES (?, ?, ?, ?, ?, ?)",
+                (propietario_id, caravana, "Automatico", fecha, mensaje, "Email"),
+            )
+            log_automatizacion("recordatorio", "historia_clinica", consulta_id, f"Recordatorio programado para {fecha}")
+
+def revisar_reorden_stock():
+    df = fetch_data(
+        """
+        SELECT s.producto_id, f.nombre_producto, SUM(s.cantidad) as cantidad_total,
+               MAX(s.stock_minimo) as stock_minimo,
+               MAX(COALESCE(s.proveedor_predeterminado, f.proveedor, '')) as proveedor
+        FROM stock s JOIN farmacia f ON s.producto_id = f.id
+        GROUP BY s.producto_id, f.nombre_producto
+        HAVING stock_minimo > 0 AND cantidad_total <= stock_minimo
+        """
+    )
+    for _, row in df.iterrows():
+        existente = fetch_data(
+            "SELECT id FROM ordenes_compra WHERE producto_id = ? AND estado = 'Borrador'",
+            (int(row["producto_id"]),),
+        )
+        if existente.empty:
+            sugerida = max(int(row["stock_minimo"] or 0) * 2 - int(row["cantidad_total"] or 0), int(row["stock_minimo"] or 0))
+            run_query(
+                "INSERT INTO ordenes_compra (producto_id, proveedor, cantidad_sugerida, motivo) VALUES (?, ?, ?, ?)",
+                (int(row["producto_id"]), row["proveedor"], sugerida, f"Stock bajo: {row['nombre_producto']}"),
+            )
+            log_automatizacion("reorden_stock", "stock", int(row["producto_id"]), "Orden de compra borrador generada")
 
 # --- USUARIOS ---
 def hash_password(password):
@@ -1141,6 +1359,16 @@ if USAR_SUPABASE:
         pass
 
 # Migraciones
+def agregar_columna_si_falta(tabla, columna, definicion):
+    try:
+        with sqlite3.connect(DB_NAME) as conn:
+            cols = [r[1] for r in conn.execute(f"PRAGMA table_info({tabla})").fetchall()]
+            if columna not in cols:
+                conn.execute(f"ALTER TABLE {tabla} ADD COLUMN {columna} {definicion}")
+                conn.commit()
+    except:
+        pass
+
 try:
     with sqlite3.connect(DB_NAME) as conn:
         c = conn.cursor()
@@ -1148,6 +1376,17 @@ try:
         conn.commit()
 except:
     pass
+for tabla, columna, definicion in [
+    ("historia_clinica", "subjetivo", "TEXT"),
+    ("historia_clinica", "objetivo", "TEXT"),
+    ("historia_clinica", "analisis", "TEXT"),
+    ("historia_clinica", "plan", "TEXT"),
+    ("historia_clinica", "template_id", "INTEGER"),
+    ("stock", "stock_minimo", "INTEGER DEFAULT 0"),
+    ("stock", "proveedor_predeterminado", "TEXT"),
+]:
+    agregar_columna_si_falta(tabla, columna, definicion)
+sembrar_templates_ehr()
 try:
     with sqlite3.connect(DB_NAME) as conn:
         c = conn.cursor()
@@ -1171,7 +1410,7 @@ if st.sidebar.button("Cerrar Sesion"):
 st.sidebar.markdown("### Menu")
 opciones_menu = [
     "Dashboard Analitico", "Trazabilidad e Inventario", "Propietarios/Clientes",
-    "Historia Clinica", "Sanidad y Brucelosis", "Hospitalizacion",
+    "Pizarra Clinica", "Historia Clinica", "Sanidad y Brucelosis", "Hospitalizacion",
     "Agenda/Citas", "Laboratorio", "Farmacia/Stock",
     "Recetario Digital", "Facturacion", "CRM y Seguimiento",
     "Recordatorios", "Produccion y Pesajes",
@@ -1306,6 +1545,135 @@ elif menu == "Trazabilidad e Inventario":
         WHERE b.estado='Activo'
     """)
     st.dataframe(df_inv, width=1200, hide_index=True)
+
+# ====================== PIZARRA CLINICA ======================
+elif menu == "Pizarra Clinica":
+    render_app_header("Pizarra Clinica", "Flujo tipo Kanban para pacientes, tareas y responsables.")
+    caravanas = obtener_lista_caravanas()
+    estados = ["Espera", "En Consulta", "Pre-quirurgico", "Quirofano", "Recuperacion", "Listo para Alta"]
+
+    tab_flujo, tab_tareas = st.tabs(["Flujo de pacientes", "Tareas"])
+    with tab_flujo:
+        with st.form("form_workflow"):
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                car_w = st.selectbox("Paciente", caravanas) if caravanas else st.text_input("Paciente")
+                estado_w = st.selectbox("Estado", estados)
+            with c2:
+                responsable_w = st.text_input("Responsable", st.session_state.usuario["nombre"])
+                prioridad_w = st.selectbox("Prioridad", ["Normal", "Alta", "Urgente"])
+            with c3:
+                obs_w = st.text_area("Observaciones")
+            if st.form_submit_button("Actualizar estado"):
+                run_query(
+                    """
+                    INSERT INTO workflow_pacientes (caravana, estado, responsable, prioridad, observaciones, actualizado_en)
+                    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(caravana) DO UPDATE SET
+                        estado=excluded.estado,
+                        responsable=excluded.responsable,
+                        prioridad=excluded.prioridad,
+                        observaciones=excluded.observaciones,
+                        actualizado_en=CURRENT_TIMESTAMP
+                    """,
+                    (car_w, estado_w, responsable_w, prioridad_w, obs_w),
+                )
+                st.success("Estado actualizado.")
+
+        df_flow = fetch_data("SELECT * FROM workflow_pacientes ORDER BY actualizado_en DESC")
+        cols = st.columns(3)
+        for idx, estado in enumerate(estados):
+            with cols[idx % 3]:
+                st.markdown(f"### {estado}")
+                subset = df_flow[df_flow["estado"] == estado] if not df_flow.empty else pd.DataFrame()
+                if subset.empty:
+                    st.info("Sin pacientes")
+                else:
+                    st.dataframe(subset[["caravana", "prioridad", "responsable", "actualizado_en"]], use_container_width=True, hide_index=True)
+
+    with tab_tareas:
+        with st.form("form_tarea"):
+            c1, c2 = st.columns(2)
+            with c1:
+                car_t = st.selectbox("Paciente", caravanas, key="tarea_car") if caravanas else st.text_input("Paciente", key="tarea_car_text")
+                tarea = st.text_input("Tarea")
+            with c2:
+                asignado = st.text_input("Asignado a")
+                vence = st.date_input("Vence", date.today())
+            if st.form_submit_button("Crear tarea"):
+                run_query(
+                    "INSERT INTO workflow_tareas (caravana, tarea, asignado_a, vence_en) VALUES (?, ?, ?, ?)",
+                    (car_t, tarea, asignado, vence),
+                )
+                st.success("Tarea creada.")
+        df_tareas = fetch_data("SELECT * FROM workflow_tareas ORDER BY estado, vence_en")
+        st.dataframe(df_tareas, use_container_width=True, hide_index=True)
+
+# ====================== HISTORIA CLINICA ======================
+elif menu == "Historia Clinica":
+    render_app_header("Historia Clinica SOAP", "Plantillas, auto-billing, recordatorios y trazabilidad clinica.")
+    caravanas = obtener_lista_caravanas()
+    if caravanas:
+        car_sel = st.selectbox("Seleccionar Animal", caravanas, key="hc_car")
+        templates = fetch_data("SELECT * FROM ehr_templates WHERE activo = 1 ORDER BY nombre")
+        df_hist = fetch_data("""
+            SELECT fecha_consulta, motivo_consulta, subjetivo, objetivo, analisis, plan, veterinario
+            FROM historia_clinica WHERE caravana = ? ORDER BY fecha_consulta DESC
+        """, (car_sel,))
+        st.dataframe(df_hist, width=1200, hide_index=True)
+
+        with st.expander("Nueva Consulta SOAP", expanded=True):
+            tpl_id = None
+            tpl = {}
+            if not templates.empty:
+                tpl_id = st.selectbox(
+                    "Plantilla",
+                    [0] + templates["id"].tolist(),
+                    format_func=lambda x: "Sin plantilla" if x == 0 else templates.loc[templates["id"] == x, "nombre"].iloc[0],
+                )
+                if tpl_id:
+                    tpl = templates[templates["id"] == tpl_id].iloc[0].to_dict()
+                    st.info("La plantilla carga SOAP, cargos sugeridos y recordatorios automaticos.")
+            with st.form("form_hc", clear_on_submit=True):
+                c1, c2 = st.columns(2)
+                with c1:
+                    motivo = st.text_area("Motivo de consulta", value=tpl.get("motivo", ""))
+                    subjetivo = st.text_area("S - Subjetivo", value=tpl.get("subjetivo", ""))
+                    objetivo = st.text_area("O - Objetivo", value=tpl.get("objetivo", ""))
+                with c2:
+                    analisis = st.text_area("A - Analisis / Diagnostico", value=tpl.get("analisis", ""))
+                    plan = st.text_area("P - Plan / Tratamiento", value=tpl.get("plan", ""))
+                    diagnostico = st.text_input("Diagnostico principal")
+                observaciones = st.text_area("Observaciones")
+                if st.form_submit_button("Guardar Consulta"):
+                    consulta_id = run_insert_return_id(
+                        """
+                        INSERT INTO historia_clinica
+                        (caravana, motivo_consulta, anamnesis, exploracion_fisica, diagnostico_presuntivo,
+                         diagnostico_definitivo, tratamiento, observaciones, veterinario,
+                         subjetivo, objetivo, analisis, plan, template_id)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            car_sel, motivo, subjetivo, objetivo, analisis,
+                            diagnostico, plan, observaciones, st.session_state.usuario['nombre'],
+                            subjetivo, objetivo, analisis, plan, tpl_id,
+                        ),
+                    )
+                    if consulta_id:
+                        aplicar_automatizaciones_consulta(consulta_id, car_sel, tpl_id)
+                        st.success("Consulta registrada. Automatizaciones aplicadas.")
+                    else:
+                        st.error("No se pudo guardar la consulta.")
+
+        with st.expander("Plantillas y reglas de automatizacion"):
+            if not templates.empty:
+                st.dataframe(templates[["id", "nombre", "motivo", "activo"]], use_container_width=True, hide_index=True)
+                template_sel = st.selectbox("Plantilla para ver reglas", templates["id"].tolist(), format_func=lambda x: templates.loc[templates["id"] == x, "nombre"].iloc[0])
+                reglas = fetch_data("SELECT concepto, cantidad, precio_unitario, stock_cantidad, recordatorio_meses, recordatorio_mensaje FROM ehr_template_items WHERE template_id = ?", (template_sel,))
+                st.dataframe(reglas, use_container_width=True, hide_index=True)
+    else:
+        st.warning("No hay animales registrados.")
 
 # ====================== SANIDAD ======================
 elif menu == "Sanidad y Brucelosis":
@@ -1711,8 +2079,9 @@ elif menu == "Recordatorios":
 # ====================== FARMACIA ======================
 elif menu == "Farmacia/Stock":
     st.title("Farmacia y Control de Stock")
+    revisar_reorden_stock()
 
-    tab_f1, tab_f2, tab_f3 = st.tabs(["Productos", "Stock/Lotes", "Proximos a vencer"])
+    tab_f1, tab_f2, tab_f3, tab_f4 = st.tabs(["Productos", "Stock/Lotes", "Proximos a vencer", "Reorden"])
 
     with tab_f1:
         with st.expander("Nuevo Producto"):
@@ -1748,13 +2117,16 @@ elif menu == "Farmacia/Stock":
                     precio_c = st.number_input("Precio compra $", min_value=0.0, step=100.0)
                     precio_v = st.number_input("Precio venta $", min_value=0.0, step=100.0)
                     ubicacion = st.text_input("Ubicacion")
+                    stock_minimo = st.number_input("Stock minimo", min_value=0, step=1)
+                    proveedor_pred = st.text_input("Proveedor predeterminado")
                     if st.form_submit_button("Agregar Stock"):
-                        run_query("INSERT INTO stock (producto_id, lote, fecha_vencimiento, cantidad, precio_compra, precio_venta, ubicacion) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                                 (prod_id, lote, fecha_venc, cantidad, precio_c, precio_v, ubicacion))
+                        run_query("INSERT INTO stock (producto_id, lote, fecha_vencimiento, cantidad, precio_compra, precio_venta, ubicacion, stock_minimo, proveedor_predeterminado) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                 (prod_id, lote, fecha_venc, cantidad, precio_c, precio_v, ubicacion, stock_minimo, proveedor_pred))
                         st.success("Stock agregado.")
 
             df_stock = fetch_data("""
-                SELECT f.nombre_producto, f.tipo_producto, s.lote, s.fecha_vencimiento, s.cantidad, s.precio_compra, s.precio_venta, s.ubicacion
+                SELECT f.nombre_producto, f.tipo_producto, s.lote, s.fecha_vencimiento, s.cantidad,
+                       s.stock_minimo, s.proveedor_predeterminado, s.precio_compra, s.precio_venta, s.ubicacion
                 FROM stock s JOIN farmacia f ON s.producto_id = f.id
                 ORDER BY s.fecha_vencimiento
             """)
@@ -1778,6 +2150,23 @@ elif menu == "Farmacia/Stock":
                     st.info(f"{row['nombre_producto']} lote {row['lote']} - {row['dias_restantes']} dias restantes")
         else:
             st.success("No hay productos proximos a vencer")
+
+    with tab_f4:
+        st.caption("Cuando el stock queda por debajo del minimo, el sistema crea una orden de compra en borrador.")
+        df_oc = fetch_data("""
+            SELECT oc.id, f.nombre_producto, oc.proveedor, oc.cantidad_sugerida, oc.motivo, oc.estado, oc.fecha_creacion
+            FROM ordenes_compra oc JOIN farmacia f ON oc.producto_id = f.id
+            ORDER BY oc.fecha_creacion DESC, oc.id DESC
+        """)
+        st.dataframe(df_oc, use_container_width=True, hide_index=True)
+        ids_oc = df_oc["id"].tolist() if not df_oc.empty else []
+        if ids_oc:
+            with st.form("form_oc_estado"):
+                oc_sel = st.selectbox("Orden", ids_oc)
+                estado_oc = st.selectbox("Estado", ["Borrador", "Solicitada", "Recibida", "Cancelada"])
+                if st.form_submit_button("Actualizar orden"):
+                    run_query("UPDATE ordenes_compra SET estado = ? WHERE id = ?", (estado_oc, oc_sel))
+                    st.success("Orden actualizada.")
 
 # ====================== RECETARIO ======================
 elif menu == "Recetario Digital":
