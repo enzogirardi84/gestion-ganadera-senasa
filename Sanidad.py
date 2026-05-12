@@ -1257,12 +1257,11 @@ elif menu == "Dashboard Analitico":
 
 # ====================== TRAZABILIDAD ======================
 elif menu == "Trazabilidad e Inventario":
-    st.title("Trazabilidad e Inventario (SIGSA)")
-
+    render_app_header("Trazabilidad e Inventario", "Registro oficial SIGSA - Res. SENASA 67/2019")
     df_props = fetch_data("SELECT id, nombre, apellido FROM propietarios")
     props_list = ["Sin propietario"] + [f"{r['nombre']} {r['apellido']}" for _, r in df_props.iterrows()]
-
-    with st.expander("Alta de Animal"):
+    tab_alt, tab_mod = st.tabs(["Alta de Animal", "Modificar Estado"])
+    with tab_alt:
         with st.form("form_alta", clear_on_submit=True):
             st.info("A partir de 2026 RFID obligatorio")
             c1, c2 = st.columns(2)
@@ -1276,7 +1275,6 @@ elif menu == "Trazabilidad e Inventario":
                 peso_nac = st.number_input("Peso (Kg)", min_value=10.0, value=35.0)
                 fecha_nac = st.date_input("Fecha Nacimiento", date.today())
                 prop_idx = st.selectbox("Propietario", range(len(props_list)), format_func=lambda i: props_list[i])
-
             if st.form_submit_button("Registrar"):
                 if caravana.strip():
                     prop_id = None if prop_idx == 0 else df_props.iloc[prop_idx - 1]['id']
@@ -1288,16 +1286,7 @@ elif menu == "Trazabilidad e Inventario":
                 else:
                     st.error("Caravana obligatoria.")
 
-    st.markdown("### Padron")
-    df_inv = fetch_data("""
-        SELECT b.caravana, b.tipo_identificacion, b.sexo, b.categoria, b.fecha_nacimiento, b.estatus_brucelosis,
-               COALESCE(p.nombre || ' ' || p.apellido, 'Sin propietario') as propietario
-        FROM bovinos b LEFT JOIN propietarios p ON b.propietario_id = p.id
-        WHERE b.estado='Activo'
-    """)
-    st.dataframe(df_inv, width=1200, hide_index=True)
-
-    with st.expander("Modificar Animal"):
+    with tab_mod:
         caravanas_all = obtener_lista_caravanas()
         if caravanas_all:
             with st.form("form_mod"):
@@ -1306,69 +1295,17 @@ elif menu == "Trazabilidad e Inventario":
                 if st.form_submit_button("Actualizar"):
                     run_query("UPDATE bovinos SET estado = ? WHERE caravana = ?", (nuevo_estado, car_sel))
                     st.success("Actualizado.")
+        else:
+            st.warning("No hay animales registrados.")
 
-# ====================== PROPIETARIOS ======================
-elif menu == "Propietarios/Clientes":
-    st.title("Gestion de Propietarios/Clientes")
-    with st.expander("Nuevo Propietario"):
-        with st.form("form_prop", clear_on_submit=True):
-            c1, c2 = st.columns(2)
-            with c1:
-                nombre = st.text_input("Nombre")
-                apellido = st.text_input("Apellido")
-                documento = st.text_input("DNI/LE")
-                telefono = st.text_input("Telefono")
-            with c2:
-                email = st.text_input("Email")
-                direccion = st.text_input("Direccion")
-                localidad = st.text_input("Localidad")
-                provincia = st.selectbox("Provincia", ["Buenos Aires", "CABA", "Catamarca", "Chaco", "Chubut", "Cordoba", "Corrientes", "Entre Rios", "Formosa", "Jujuy", "La Pampa", "La Rioja", "Mendoza", "Misiones", "Neuquen", "Rio Negro", "Salta", "San Juan", "San Luis", "Santa Cruz", "Santa Fe", "Santiago del Estero", "Tierra del Fuego", "Tucuman"])
-                cuit = st.text_input("CUIT")
-
-            if st.form_submit_button("Registrar"):
-                run_query("INSERT INTO propietarios (nombre, apellido, documento, telefono, email, direccion, localidad, provincia, cuit) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                         (nombre, apellido, documento, telefono, email, direccion, localidad, provincia, cuit))
-                st.success("Propietario registrado.")
-
-    df_props = fetch_data("SELECT * FROM propietarios ORDER BY apellido")
-    st.dataframe(df_props, width=1200, hide_index=True)
-
-    with st.expander("Animales por Propietario"):
-        if not df_props.empty:
-            sel_prop = st.selectbox("Propietario", df_props['id'].tolist(), format_func=lambda i: f"{df_props[df_props['id']==i]['nombre'].values[0]} {df_props[df_props['id']==i]['apellido'].values[0]}")
-            df_bov_prop = fetch_data("SELECT caravana, raza, sexo, categoria FROM bovinos WHERE propietario_id = ?", (sel_prop,))
-            st.dataframe(df_bov_prop, width=1200, hide_index=True)
-
-# ====================== HISTORIA CLINICA ======================
-elif menu == "Historia Clinica":
-    st.title("Historia Clinica Electronica")
-    caravanas = obtener_lista_caravanas()
-    if caravanas:
-        car_sel = st.selectbox("Seleccionar Animal", caravanas, key="hc_car")
-        df_hist = fetch_data("""
-            SELECT fecha_consulta, motivo_consulta, diagnostico_presuntivo, diagnostico_definitivo, tratamiento, veterinario
-            FROM historia_clinica WHERE caravana = ? ORDER BY fecha_consulta DESC
-        """, (car_sel,))
-        st.dataframe(df_hist, width=1200, hide_index=True)
-
-        with st.expander("Nueva Consulta"):
-            with st.form("form_hc", clear_on_submit=True):
-                c1, c2 = st.columns(2)
-                with c1:
-                    motivo = st.text_area("Motivo de consulta")
-                    anamnesis = st.text_area("Anamnesis")
-                    exploracion = st.text_area("Exploracion fisica")
-                with c2:
-                    diag_p = st.text_area("Diagnostico presuntivo")
-                    diag_d = st.text_area("Diagnostico definitivo")
-                    tratamiento = st.text_area("Tratamiento indicado")
-                observaciones = st.text_area("Observaciones")
-                if st.form_submit_button("Guardar Consulta"):
-                    run_query("INSERT INTO historia_clinica (caravana, motivo_consulta, anamnesis, exploracion_fisica, diagnostico_presuntivo, diagnostico_definitivo, tratamiento, observaciones, veterinario) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                             (car_sel, motivo, anamnesis, exploracion, diag_p, diag_d, tratamiento, observaciones, st.session_state.usuario['nombre']))
-                    st.success("Consulta registrada.")
-    else:
-        st.warning("No hay animales registrados.")
+    st.markdown("### Padron")
+    df_inv = fetch_data("""
+        SELECT b.caravana, b.tipo_identificacion, b.sexo, b.categoria, b.fecha_nacimiento, b.estatus_brucelosis,
+               COALESCE(p.nombre || ' ' || p.apellido, 'Sin propietario') as propietario
+        FROM bovinos b LEFT JOIN propietarios p ON b.propietario_id = p.id
+        WHERE b.estado='Activo'
+    """)
+    st.dataframe(df_inv, width=1200, hide_index=True)
 
 # ====================== SANIDAD ======================
 elif menu == "Sanidad y Brucelosis":
