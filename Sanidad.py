@@ -1194,26 +1194,27 @@ if menu == "Usuarios y Seguridad":
 
 # ====================== DASHBOARD ======================
 elif menu == "Dashboard Analitico":
-    st.title("Panel de Control")
+    render_app_header("Dashboard Analitico", "Indicadores clave y estado general del establecimiento")
     crear_backup()
     df_bov = fetch_data("SELECT * FROM bovinos WHERE estado = 'Activo'")
     if not df_bov.empty:
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Total Cabezas", len(df_bov))
-        c2.metric("Hembras", len(df_bov[df_bov['sexo'] == 'Hembra']))
-        c3.metric("Machos", len(df_bov[df_bov['sexo'] == 'Macho']))
-        rfid_count = len(df_bov[df_bov['tipo_identificacion'] == 'RFID (Electronica)'])
-        c4.metric("RFID", f"{rfid_count} / {len(df_bov)}", delta_color="off")
-        c5, c6, c7, c8 = st.columns(4)
-        c5.metric("Brucelosis +", len(df_bov[df_bov['estatus_brucelosis'] == 'Positivo']), delta_color="inverse")
-        df_pes = fetch_data("SELECT AVG(peso_kg) as promedio FROM pesajes")
-        prom = df_pes['promedio'].iloc[0] if not df_pes.empty and pd.notna(df_pes['promedio'].iloc[0]) else 0
-        c6.metric("Peso Promedio", f"{prom:.1f} kg")
-        df_repr = fetch_data("SELECT COUNT(*) as total FROM reproduccion WHERE fecha_parto IS NOT NULL")
-        c7.metric("Partos", df_repr['total'].iloc[0])
-        df_al = fetch_data("SELECT COUNT(*) as total FROM alertas WHERE resuelta = 0")
-        c8.metric("Alertas", df_al['total'].iloc[0], delta_color="inverse")
-
+        with st.container():
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Total Cabezas", len(df_bov))
+            c2.metric("Hembras", len(df_bov[df_bov['sexo'] == 'Hembra']))
+            c3.metric("Machos", len(df_bov[df_bov['sexo'] == 'Macho']))
+            rfid_count = len(df_bov[df_bov['tipo_identificacion'] == 'RFID (Electronica)'])
+            c4.metric("RFID", f"{rfid_count} / {len(df_bov)}", delta_color="off")
+        with st.container():
+            c5, c6, c7, c8 = st.columns(4)
+            c5.metric("Brucelosis +", len(df_bov[df_bov['estatus_brucelosis'] == 'Positivo']), delta_color="inverse")
+            df_pes = fetch_data("SELECT AVG(peso_kg) as p FROM pesajes")
+            prom = df_pes['p'].iloc[0] if not df_pes.empty and pd.notna(df_pes['p'].iloc[0]) else 0
+            c6.metric("Peso Promedio", f"{prom:.1f} kg")
+            df_repr = fetch_data("SELECT COUNT(*) as t FROM reproduccion WHERE fecha_parto IS NOT NULL")
+            c7.metric("Partos", df_repr['t'].iloc[0])
+            df_al = fetch_data("SELECT COUNT(*) as t FROM alertas WHERE resuelta = 0")
+            c8.metric("Alertas", df_al['t'].iloc[0], delta_color="inverse")
         st.markdown("---")
         col_graf1, col_graf2 = st.columns(2)
         with col_graf1:
@@ -1229,21 +1230,18 @@ elif menu == "Dashboard Analitico":
         with col_graf4:
             st.markdown("### Identificacion")
             st.bar_chart(df_bov['tipo_identificacion'].value_counts(), color="#ff7f0e")
-
         st.markdown("---")
         st.markdown("### Indicadores")
         col_e1, col_e2, col_e3 = st.columns(3)
         with col_e1:
-            nacimientos = len(df_bov[df_bov['categoria'].str.contains('Ternero', case=False)])
-            tasa = (nacimientos / len(df_bov)) * 100
-            st.metric("Tasa Natalidad", f"{tasa:.1f}%")
+            nac = len(df_bov[df_bov['categoria'].str.contains('Ternero', case=False)])
+            st.metric("Tasa Natalidad", f"{(nac/len(df_bov))*100:.1f}%" if len(df_bov)>0 else "0%")
         with col_e2:
-            df_enf = fetch_data("SELECT COUNT(*) as total FROM sanidad WHERE categoria_evento LIKE '%Clinico%'")
-            st.metric("Tratamientos Clinicos", df_enf['total'].iloc[0] if not df_enf.empty else 0)
+            df_e = fetch_data("SELECT COUNT(*) as t FROM sanidad WHERE categoria_evento LIKE '%Clinico%'")
+            st.metric("Tratamientos", df_e['t'].iloc[0] if not df_e.empty else 0)
         with col_e3:
-            df_vac = fetch_data("SELECT COUNT(DISTINCT caravana) as total FROM sanidad WHERE categoria_evento LIKE '%Aftosa%'")
-            st.metric("Vacunados Aftosa", df_vac['total'].iloc[0] if not df_vac.empty else 0)
-
+            df_v = fetch_data("SELECT COUNT(DISTINCT caravana) as t FROM sanidad WHERE categoria_evento LIKE '%Aftosa%'")
+            st.metric("Vacunados Aftosa", df_v['t'].iloc[0] if not df_v.empty else 0)
         with st.expander("Alertas de Stock - Proximos a vencer"):
             df_venc = fetch_data("""
                 SELECT f.nombre_producto, s.lote, s.fecha_vencimiento, s.cantidad
