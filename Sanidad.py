@@ -721,6 +721,66 @@ def generar_excel_completo(tablas):
             ws.column_dimensions[column_cells[0].column_letter].width = min(max(max_len + 2, 12), 32)
     return output.getvalue()
 
+def aplicar_formato_excel(writer, sheet_name, color="115E59"):
+    ws = writer.book[sheet_name]
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+    for cell in ws[1]:
+        cell.font = cell.font.copy(bold=True, color="FFFFFF")
+        cell.fill = cell.fill.copy(fill_type="solid", fgColor=color)
+    for column_cells in ws.columns:
+        max_len = max(len(str(cell.value or "")) for cell in column_cells)
+        ws.column_dimensions[column_cells[0].column_letter].width = min(max(max_len + 2, 12), 42)
+
+def generar_excel_ejecutivo():
+    output = io.BytesIO()
+    animales = fetch_data("SELECT * FROM bovinos")
+    stock = fetch_data("""
+        SELECT f.nombre_producto, f.tipo_producto, f.proveedor, s.lote, s.fecha_vencimiento,
+               s.cantidad, s.precio_compra, s.precio_venta,
+               (s.cantidad * COALESCE(s.precio_compra, 0)) as valor_costo,
+               (s.cantidad * COALESCE(s.precio_venta, 0)) as valor_venta,
+               s.stock_minimo
+        FROM stock s JOIN farmacia f ON s.producto_id = f.id
+    """)
+    facturacion = fetch_data("""
+        SELECT strftime('%Y-%m', fecha_emision) as periodo, tipo_comprobante, estado_pago,
+               COUNT(*) as comprobantes, SUM(total) as total
+        FROM facturacion GROUP BY periodo, tipo_comprobante, estado_pago ORDER BY periodo DESC
+    """)
+    sanidad = fetch_data("""
+        SELECT categoria_evento, COUNT(*) as eventos, COUNT(DISTINCT caravana) as animales
+        FROM sanidad GROUP BY categoria_evento ORDER BY eventos DESC
+    """)
+    recordatorios = fetch_data("""
+        SELECT tipo_recordatorio, canal, enviado, COUNT(*) as total
+        FROM recordatorios GROUP BY tipo_recordatorio, canal, enviado ORDER BY total DESC
+    """)
+
+    kpis = [
+        {"Indicador": "Animales registrados", "Valor": len(animales)},
+        {"Indicador": "Animales activos", "Valor": int((animales["estado"] == "Activo").sum()) if not animales.empty and "estado" in animales else 0},
+        {"Indicador": "Stock valorizado costo", "Valor": float(stock["valor_costo"].sum()) if not stock.empty else 0},
+        {"Indicador": "Stock valorizado venta", "Valor": float(stock["valor_venta"].sum()) if not stock.empty else 0},
+        {"Indicador": "Facturacion total", "Valor": float(facturacion["total"].sum()) if not facturacion.empty else 0},
+        {"Indicador": "Eventos sanitarios", "Valor": int(sanidad["eventos"].sum()) if not sanidad.empty else 0},
+    ]
+
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        pd.DataFrame(kpis).to_excel(writer, sheet_name="Resumen Ejecutivo", index=False)
+        aplicar_formato_excel(writer, "Resumen Ejecutivo", "115E59")
+
+        hojas = [
+            ("Stock Valorizado", stock, "14532D"),
+            ("Facturacion Mensual", facturacion, "0F766E"),
+            ("Sanidad", sanidad, "991B1B"),
+            ("Recordatorios", recordatorios, "1D4ED8"),
+        ]
+        for nombre, df, color in hojas:
+            df.to_excel(writer, sheet_name=nombre, index=False)
+            aplicar_formato_excel(writer, nombre, color)
+    return output.getvalue()
+
 def verificar_alertas():
     bovinos = fetch_data("SELECT caravana, fecha_nacimiento, estatus_brucelosis FROM bovinos WHERE estado = 'Activo'")
     today = date.today()
@@ -3259,14 +3319,24 @@ elif menu == "Exportar Reportes (PDF)":
             st.info("La tabla seleccionada no tiene registros.")
 
     with tab_excel:
-        st.write("Incluye una hoja de resumen y una hoja por tabla disponible, con filtros y columnas ajustadas.")
-        excel_bytes = generar_excel_completo(TABLAS_EXPORTABLES)
-        st.download_button(
-            "Descargar Excel completo",
-            data=excel_bytes,
-            file_name=f"exportacion_completa_senasa_{fecha_archivo}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
+        st.write("Incluye hojas ejecutivas calculadas y una exportacion completa con filtros y columnas ajustadas.")
+        col_excel_1, col_excel_2 = st.columns(2)
+        with col_excel_1:
+            excel_ejecutivo = generar_excel_ejecutivo()
+            st.download_button(
+                "Descargar Excel ejecutivo",
+                data=excel_ejecutivo,
+                file_name=f"reporte_ejecutivo_senasa_{fecha_archivo}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        with col_excel_2:
+            excel_bytes = generar_excel_completo(TABLAS_EXPORTABLES)
+            st.download_button(
+                "Descargar Excel completo",
+                data=excel_bytes,
+                file_name=f"exportacion_completa_senasa_{fecha_archivo}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
 
     st.markdown("---")
     st.markdown("### Curva de Crecimiento Individual")
