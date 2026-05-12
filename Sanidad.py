@@ -25,6 +25,8 @@ DB_NAME = 'gestion_bovinos_senasa.db'
 BACKUP_DIR = 'backups'
 ROLES_USUARIO = ["Administrador", "Veterinario", "Tecnico", "Propietario"]
 PBKDF2_ITERATIONS = 260000
+DEFAULT_ADMIN_USERNAME = "admin"
+DEFAULT_ADMIN_LEGACY_HASH = "240be518fabd2724ddb6f04eeb1da5967448d7e831c08c8fa822809f74c720a9"
 
 _supabase = None
 
@@ -609,9 +611,17 @@ def requiere_rehash(password_hash):
 def normalizar_usuario(username):
     return str(username or "").strip().lower()
 
-def hay_usuarios_registrados():
-    df = fetch_data("SELECT COUNT(*) as total FROM usuarios")
-    return bool(not df.empty and int(df["total"].iloc[0] or 0) > 0)
+def requiere_configuracion_inicial():
+    usuarios = fetch_data("SELECT id, username, password_hash FROM usuarios ORDER BY id")
+    if usuarios.empty:
+        return True
+    if len(usuarios) == 1:
+        unico = usuarios.iloc[0]
+        return (
+            normalizar_usuario(unico["username"]) == DEFAULT_ADMIN_USERNAME
+            and str(unico["password_hash"] or "") == DEFAULT_ADMIN_LEGACY_HASH
+        )
+    return False
 
 def usuario_actual_es_admin():
     usuario = st.session_state.get("usuario") or {}
@@ -634,6 +644,29 @@ def crear_usuario_app(username, password, nombre, rol, activo=1):
     if not ok:
         return False, "El usuario ya existe."
     return True, "Usuario creado."
+
+def guardar_admin_inicial(username, password, nombre):
+    username = normalizar_usuario(username)
+    nombre = str(nombre or "").strip() or username
+    if len(username) < 3:
+        return False, "El usuario debe tener al menos 3 caracteres."
+    if len(str(password or "")) < 8:
+        return False, "La clave debe tener al menos 8 caracteres."
+
+    usuarios = fetch_data("SELECT id, username, password_hash FROM usuarios ORDER BY id")
+    if len(usuarios) == 1:
+        unico = usuarios.iloc[0]
+        if (
+            normalizar_usuario(unico["username"]) == DEFAULT_ADMIN_USERNAME
+            and str(unico["password_hash"] or "") == DEFAULT_ADMIN_LEGACY_HASH
+        ):
+            ok = run_query(
+                "UPDATE usuarios SET username = ?, password_hash = ?, nombre = ?, rol = 'Administrador', activo = 1 WHERE id = ?",
+                (username, hash_password(password), nombre, int(unico["id"])),
+            )
+            return (ok, "Administrador actualizado.") if ok else (False, "No se pudo actualizar el administrador inicial.")
+
+    return crear_usuario_app(username, password, nombre, "Administrador", activo=1)
 
 def actualizar_usuario_app(user_id, nombre, rol, activo):
     rol = rol if rol in ROLES_USUARIO else "Veterinario"
@@ -661,7 +694,7 @@ def render_setup_inicial():
             if password != password2:
                 st.error("Las claves no coinciden.")
             else:
-                ok, msg = crear_usuario_app(username, password, nombre, "Administrador", activo=1)
+                ok, msg = guardar_admin_inicial(username, password, nombre)
                 if ok:
                     st.success("Administrador creado. Ahora inicia sesion.")
                     st.rerun()
@@ -776,10 +809,10 @@ except:
     pass
 
 if st.session_state.usuario is None:
-    if hay_usuarios_registrados():
-        render_login()
-    else:
+    if requiere_configuracion_inicial():
         render_setup_inicial()
+    else:
+        render_login()
     st.stop()
 
 st.sidebar.markdown(f"**Usuario:** {st.session_state.usuario['nombre']} ({st.session_state.usuario['rol']})")
