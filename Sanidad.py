@@ -15,7 +15,7 @@ import csv
 # Configuracion - cambiar a False para usar Supabase
 USAR_SUPABASE = False  # False = SQLite local/cloud | True = Supabase cloud
 
-SUPABASE_URL = "https://tfdgaxowacbxqtuvhhdp.supabase.co"
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_ANON_KEY", "")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
 
@@ -581,17 +581,28 @@ except:
     pass
 
 if st.session_state.usuario is None:
-    st.title("Inicio de Sesion")
+    st.title("🐄 Gestion Ganadera SENASA")
+    st.markdown("### Inicio de Sesion")
     with st.form("login"):
         username = st.text_input("Usuario")
         password = st.text_input("Clave", type="password")
         if st.form_submit_button("Ingresar"):
-            df = fetch_data("SELECT * FROM usuarios WHERE username = ? AND activo = 1", (username,))
-            if not df.empty and df['password_hash'].iloc[0] == hash_password(password):
-                st.session_state.usuario = df.iloc[0].to_dict()
-                st.rerun()
-            else:
-                st.error("Usuario o clave incorrectos")
+            try:
+                conn = sqlite3.connect(DB_NAME)
+                c = conn.cursor()
+                c.execute("SELECT * FROM usuarios WHERE username = ? AND activo = 1", (username,))
+                row = c.fetchone()
+                conn.close()
+                if row and row[2] == hash_password(password):
+                    st.session_state.usuario = {
+                        'id': row[0], 'username': row[1],
+                        'nombre': row[3], 'rol': row[4]
+                    }
+                    st.rerun()
+                else:
+                    st.error("Usuario o clave incorrectos")
+            except:
+                st.error("Error de conexion a la base de datos")
 
     st.markdown("---")
     col_reg1, _ = st.columns(2)
