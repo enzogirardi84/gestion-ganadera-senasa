@@ -9,8 +9,11 @@ import tempfile
 import os
 import shutil
 import hashlib
+import hmac
+import secrets
 import io
 import csv
+import unicodedata
 
 # Configuracion - cambiar a False para usar Supabase
 USAR_SUPABASE = False  # False = SQLite local/cloud | True = Supabase cloud
@@ -21,6 +24,17 @@ SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
 
 DB_NAME = 'gestion_bovinos_senasa.db'
 BACKUP_DIR = 'backups'
+APP_NAME = "Gestion Ganadera SENASA"
+APP_SUBTITLE = "Trazabilidad, sanidad, reproduccion y gestion operativa"
+ROLES_USUARIO = ["Administrador", "Veterinario", "Tecnico", "Propietario"]
+PBKDF2_ITERATIONS = 260000
+DEFAULT_ADMIN_USERNAME = "admin"
+DEFAULT_ADMIN_LEGACY_HASH = "240be518fabd2724ddb6f04eeb1da5967448d7e831c08c8fa822809f74c720a9"
+TABLAS_EXPORTABLES = [
+    "bovinos", "sanidad", "reproduccion", "pesajes", "propietarios",
+    "farmacia", "stock", "certificados", "intervenciones", "finanzas",
+    "lotes", "agenda", "facturacion", "recetas", "alertas",
+]
 
 _supabase = None
 
@@ -438,18 +452,6 @@ except:
 
 init_db()
 
-# Crear usuario admin por defecto si no existe
-try:
-    run_query("INSERT OR IGNORE INTO usuarios (username, password_hash, nombre, rol) VALUES ('admin', '240be518fabd2724ddb6f04eeb1da5967448d7e831c08c8fa822809f74c720a9', 'Administrador', 'Administrador')")
-except:
-    pass
-
-# Migraciones: agregar columnas faltantes a tablas existentes
-try:
-    run_query("ALTER TABLE bovinos ADD COLUMN propietario_id INTEGER")
-except:
-    pass
-
 def run_query(query, params=()):
     try:
         if USAR_SUPABASE and _supabase:
@@ -465,6 +467,22 @@ def run_query(query, params=()):
         return False
     except Exception as e:
         return False
+
+def run_insert_return_id(query, params=()):
+    try:
+        with sqlite3.connect(DB_NAME) as conn:
+            c = conn.cursor()
+            c.execute(query, params)
+            conn.commit()
+            return c.lastrowid
+    except Exception:
+        return None
+
+# Migraciones: agregar columnas faltantes a tablas existentes
+try:
+    run_query("ALTER TABLE bovinos ADD COLUMN propietario_id INTEGER")
+except:
+    pass
 
 def fetch_data(query, params=()):
     if USAR_SUPABASE and _supabase:
@@ -496,28 +514,76 @@ def crear_backup():
     shutil.copy2(DB_NAME, backup_file)
     return backup_file
 
+def texto_pdf(valor):
+    texto = "" if valor is None or pd.isna(valor) else str(valor)
+    texto = unicodedata.normalize("NFKD", texto).encode("latin-1", "ignore").decode("latin-1")
+    return texto.replace("\n", " ").replace("\r", " ").strip()
+
+class ReportPDF(FPDF):
+    def __init__(self, titulo):
+        super().__init__(orientation="L", unit="mm", format="A4")
+        self.titulo = texto_pdf(titulo)
+        self.set_auto_page_break(auto=True, margin=14)
+
+    def header(self):
+        self.set_fill_color(17, 94, 89)
+        self.rect(0, 0, 297, 18, "F")
+        self.set_text_color(255, 255, 255)
+        self.set_font("Helvetica", "B", 13)
+        self.cell(0, 8, text=APP_NAME, new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="L")
+        self.set_font("Helvetica", "", 8)
+        self.cell(0, 5, text=self.titulo, new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="L")
+        self.ln(8)
+        self.set_text_color(24, 24, 27)
+
+    def footer(self):
+        self.set_y(-11)
+        self.set_font("Helvetica", "", 7)
+        self.set_text_color(113, 113, 122)
+        generado = datetime.now().strftime("%Y-%m-%d %H:%M")
+        self.cell(0, 6, text=f"Generado {generado} | Pagina {self.page_no()}", align="C")
+        self.set_text_color(24, 24, 27)
+
 def generar_pdf(df, titulo):
-    pdf = FPDF(orientation='L', unit='mm', format='A4')
+    df = df.copy()
+    df.columns = [texto_pdf(c).replace("_", " ").title() for c in df.columns]
+    pdf = ReportPDF(titulo)
     pdf.add_page()
-    pdf.set_font("Helvetica", 'B', 14)
-    pdf.cell(277, 10, text=titulo, new_x=XPos.LMARGIN, new_y=YPos.NEXT, align='C')
-    pdf.ln(5)
+    pdf.set_font("Helvetica", "B", 16)
+    pdf.cell(0, 9, text=texto_pdf(titulo), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.set_font("Helvetica", "", 9)
+    pdf.set_text_color(82, 82, 91)
+    pdf.cell(0, 6, text=f"Registros: {len(df)}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.set_text_color(24, 24, 27)
+    pdf.ln(3)
+
     if df.empty:
-        pdf.set_font("Helvetica", '', 12)
+        pdf.set_font("Helvetica", "", 12)
         pdf.cell(277, 10, text="No hay registros disponibles.", new_x=XPos.LMARGIN, new_y=YPos.NEXT, align='C')
     else:
-        pdf.set_font("Helvetica", 'B', 9)
-        ancho_col = 277 / len(df.columns)
-        alto_fila = 8
+        max_cols = min(len(df.columns), 10)
+        df = df.iloc[:, :max_cols]
+        ancho_col = 277 / max_cols
+        alto_fila = 7
+        pdf.set_fill_color(20, 83, 45)
+        pdf.set_text_color(255, 255, 255)
+        pdf.set_font("Helvetica", "B", 8)
         for col in df.columns:
-            pdf.cell(ancho_col, alto_fila, text=str(col)[:20].capitalize(), border=1, align='C')
+            pdf.cell(ancho_col, alto_fila, text=texto_pdf(col)[:26], border=0, align="C", fill=True)
         pdf.ln(alto_fila)
-        pdf.set_font("Helvetica", '', 8)
-        for _, row in df.iterrows():
+        pdf.set_text_color(24, 24, 27)
+        pdf.set_font("Helvetica", "", 7)
+        for idx, (_, row) in enumerate(df.head(250).iterrows()):
+            fill = idx % 2 == 0
+            pdf.set_fill_color(244, 244, 245) if fill else pdf.set_fill_color(255, 255, 255)
             for item in row:
-                valor = str(item) if pd.notna(item) else "-"
-                pdf.cell(ancho_col, alto_fila, text=valor[:25], border=1, align='C')
+                valor = texto_pdf(item) or "-"
+                pdf.cell(ancho_col, alto_fila, text=valor[:32], border=0, align="L", fill=True)
             pdf.ln(alto_fila)
+        if len(df) > 250:
+            pdf.ln(3)
+            pdf.set_font("Helvetica", "I", 8)
+            pdf.cell(0, 6, text="Vista limitada a 250 registros. Use Excel para el detalle completo.", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         pdf.output(tmp.name)
         with open(tmp.name, "rb") as f:
@@ -525,16 +591,65 @@ def generar_pdf(df, titulo):
     os.remove(tmp.name)
     return pdf_bytes
 
+def generar_excel_completo(tablas):
+    output = io.BytesIO()
+    resumen = []
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        for tabla in tablas:
+            try:
+                df = fetch_data(f"SELECT * FROM {tabla}")
+            except Exception:
+                continue
+            sheet = tabla[:31]
+            df.to_excel(writer, sheet_name=sheet, index=False)
+            resumen.append({"Tabla": tabla, "Registros": len(df), "Columnas": len(df.columns)})
+
+            ws = writer.book[sheet]
+            ws.freeze_panes = "A2"
+            ws.auto_filter.ref = ws.dimensions
+            for cell in ws[1]:
+                cell.font = cell.font.copy(bold=True, color="FFFFFF")
+                cell.fill = cell.fill.copy(fill_type="solid", fgColor="14532D")
+            for column_cells in ws.columns:
+                max_len = max(len(str(cell.value or "")) for cell in column_cells)
+                ws.column_dimensions[column_cells[0].column_letter].width = min(max(max_len + 2, 12), 38)
+
+        pd.DataFrame(resumen).to_excel(writer, sheet_name="Resumen", index=False)
+        ws = writer.book["Resumen"]
+        ws.freeze_panes = "A2"
+        ws.auto_filter.ref = ws.dimensions
+        for cell in ws[1]:
+            cell.font = cell.font.copy(bold=True, color="FFFFFF")
+            cell.fill = cell.fill.copy(fill_type="solid", fgColor="115E59")
+        for column_cells in ws.columns:
+            max_len = max(len(str(cell.value or "")) for cell in column_cells)
+            ws.column_dimensions[column_cells[0].column_letter].width = min(max(max_len + 2, 12), 32)
+    return output.getvalue()
+
 def verificar_alertas():
     bovinos = fetch_data("SELECT caravana, fecha_nacimiento, estatus_brucelosis FROM bovinos WHERE estado = 'Activo'")
     today = date.today()
-    run_query("DELETE FROM alertas WHERE resuelta = 1")
+    run_query("DELETE FROM alertas WHERE tipo_alerta IN ('Brucelosis Pendiente', 'Vencimiento Stock')")
+
+    def crear_alerta_unica(tipo, caravana, descripcion):
+        run_query(
+            "INSERT INTO alertas (tipo_alerta, caravana, descripcion, fecha_alerta) VALUES (?, ?, ?, ?)",
+            (tipo, caravana, descripcion, today),
+        )
+
     for _, row in bovinos.iterrows():
-        fecha_nac = datetime.strptime(str(row['fecha_nacimiento']), '%Y-%m-%d').date()
-        edad_meses = relativedelta(today, fecha_nac).months
+        try:
+            fecha_nac = datetime.strptime(str(row['fecha_nacimiento']), '%Y-%m-%d').date()
+        except Exception:
+            continue
+        edad = relativedelta(today, fecha_nac)
+        edad_meses = edad.years * 12 + edad.months
         if 3 <= edad_meses <= 8 and row['estatus_brucelosis'] == 'Sin Diagnostico':
-            run_query("INSERT INTO alertas (tipo_alerta, caravana, descripcion, fecha_alerta) VALUES (?, ?, ?, ?)",
-                     ('Brucelosis Pendiente', row['caravana'], f'Verificar vacunacion Cepa 19 (edad: {edad_meses} meses)', today))
+            crear_alerta_unica(
+                "Brucelosis Pendiente",
+                row["caravana"],
+                f"Verificar vacunacion Cepa 19 (edad: {edad_meses} meses)",
+            )
 
     stock = fetch_data("""
         SELECT s.id, f.nombre_producto, s.lote, s.fecha_vencimiento, s.cantidad
@@ -542,19 +657,457 @@ def verificar_alertas():
         WHERE s.fecha_vencimiento BETWEEN DATE('now') AND DATE('now', '+90 days')
     """)
     for _, row in stock.iterrows():
-        dias = (datetime.strptime(row['fecha_vencimiento'], '%Y-%m-%d').date() - date.today()).days
-        run_query("INSERT INTO alertas (tipo_alerta, caravana, descripcion, fecha_alerta) VALUES (?, ?, ?, ?)",
-                 ('Vencimiento Stock', 'Sistema', f"{row['nombre_producto']} lote {row['lote']} vence en {dias} dias", today))
+        try:
+            dias = (datetime.strptime(row['fecha_vencimiento'], '%Y-%m-%d').date() - today).days
+        except Exception:
+            continue
+        crear_alerta_unica(
+            "Vencimiento Stock",
+            "Sistema",
+            f"{row['nombre_producto']} lote {row['lote']} vence en {dias} dias",
+        )
 
 # --- USUARIOS ---
 def hash_password(password):
-    return hashlib.sha256(password.encode()).hexdigest()
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        str(password).encode("utf-8"),
+        salt.encode("utf-8"),
+        PBKDF2_ITERATIONS,
+    ).hex()
+    return f"pbkdf2_sha256${PBKDF2_ITERATIONS}${salt}${digest}"
+
+def verificar_password(password, password_hash):
+    stored = str(password_hash or "")
+    if stored.startswith("pbkdf2_sha256$"):
+        try:
+            _, iterations, salt, digest = stored.split("$", 3)
+            calculated = hashlib.pbkdf2_hmac(
+                "sha256",
+                str(password).encode("utf-8"),
+                salt.encode("utf-8"),
+                int(iterations),
+            ).hex()
+            return hmac.compare_digest(calculated, digest)
+        except Exception:
+            return False
+
+    legacy_digest = hashlib.sha256(str(password).encode()).hexdigest()
+    return hmac.compare_digest(legacy_digest, stored)
+
+def requiere_rehash(password_hash):
+    return not str(password_hash or "").startswith("pbkdf2_sha256$")
+
+def normalizar_usuario(username):
+    return str(username or "").strip().lower()
+
+def requiere_configuracion_inicial():
+    usuarios = fetch_data("SELECT id, username, password_hash FROM usuarios ORDER BY id")
+    if usuarios.empty:
+        return True
+    if len(usuarios) == 1:
+        unico = usuarios.iloc[0]
+        return (
+            normalizar_usuario(unico["username"]) == DEFAULT_ADMIN_USERNAME
+            and str(unico["password_hash"] or "") == DEFAULT_ADMIN_LEGACY_HASH
+        )
+    return False
+
+def usuario_actual_es_admin():
+    usuario = st.session_state.get("usuario") or {}
+    return str(usuario.get("rol", "")).strip().lower() == "administrador"
+
+def crear_usuario_app(username, password, nombre, rol, activo=1):
+    username = normalizar_usuario(username)
+    nombre = str(nombre or "").strip()
+    rol = rol if rol in ROLES_USUARIO else "Veterinario"
+    if len(username) < 3:
+        return False, "El usuario debe tener al menos 3 caracteres."
+    if len(str(password or "")) < 8:
+        return False, "La clave debe tener al menos 8 caracteres."
+    if not nombre:
+        nombre = username
+    ok = run_query(
+        "INSERT INTO usuarios (username, password_hash, nombre, rol, activo) VALUES (?, ?, ?, ?, ?)",
+        (username, hash_password(password), nombre, rol, int(bool(activo))),
+    )
+    if not ok:
+        return False, "El usuario ya existe."
+    return True, "Usuario creado."
+
+def guardar_admin_inicial(username, password, nombre):
+    username = normalizar_usuario(username)
+    nombre = str(nombre or "").strip() or username
+    if len(username) < 3:
+        return False, "El usuario debe tener al menos 3 caracteres."
+    if len(str(password or "")) < 8:
+        return False, "La clave debe tener al menos 8 caracteres."
+
+    usuarios = fetch_data("SELECT id, username, password_hash FROM usuarios ORDER BY id")
+    if len(usuarios) == 1:
+        unico = usuarios.iloc[0]
+        if (
+            normalizar_usuario(unico["username"]) == DEFAULT_ADMIN_USERNAME
+            and str(unico["password_hash"] or "") == DEFAULT_ADMIN_LEGACY_HASH
+        ):
+            ok = run_query(
+                "UPDATE usuarios SET username = ?, password_hash = ?, nombre = ?, rol = 'Administrador', activo = 1 WHERE id = ?",
+                (username, hash_password(password), nombre, int(unico["id"])),
+            )
+            return (ok, "Administrador actualizado.") if ok else (False, "No se pudo actualizar el administrador inicial.")
+
+    return crear_usuario_app(username, password, nombre, "Administrador", activo=1)
+
+def actualizar_usuario_app(user_id, nombre, rol, activo):
+    rol = rol if rol in ROLES_USUARIO else "Veterinario"
+    ok = run_query(
+        "UPDATE usuarios SET nombre = ?, rol = ?, activo = ? WHERE id = ?",
+        (str(nombre or "").strip(), rol, int(bool(activo)), int(user_id)),
+    )
+    return ok
+
+def cambiar_password_usuario_app(user_id, password):
+    if len(str(password or "")) < 8:
+        return False, "La clave debe tener al menos 8 caracteres."
+    ok = run_query("UPDATE usuarios SET password_hash = ? WHERE id = ?", (hash_password(password), int(user_id)))
+    return ok, "Clave actualizada." if ok else "No se pudo actualizar la clave."
+
+def render_setup_inicial():
+    st.markdown('<div class="gg-auth-kicker">Gestion Ganadera SENASA</div>', unsafe_allow_html=True)
+    st.title("Configuracion inicial")
+    st.caption("Crea el primer administrador. Despues, los usuarios se gestionan solo desde dentro del sistema.")
+    col_form, col_info = st.columns([0.58, 0.42], gap="large")
+    with col_form:
+        with st.form("setup_admin_inicial"):
+            username = st.text_input("Usuario administrador")
+            nombre = st.text_input("Nombre")
+            password = st.text_input("Clave", type="password")
+            password2 = st.text_input("Repetir clave", type="password")
+            if st.form_submit_button("Crear administrador"):
+                if password != password2:
+                    st.error("Las claves no coinciden.")
+                else:
+                    ok, msg = guardar_admin_inicial(username, password, nombre)
+                    if ok:
+                        st.success("Administrador creado. Ahora inicia sesion.")
+                        st.rerun()
+                    else:
+                        st.error(msg)
+    with col_info:
+        st.markdown(
+            """
+            <div class="gg-auth-panel">
+                <div class="gg-auth-panel-title">Acceso protegido</div>
+                <p>El primer usuario queda como administrador y desde ahi se crean los demas accesos.</p>
+                <p>Usa una clave fuerte. El sistema guarda contrasenas con hash seguro PBKDF2.</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+def render_login():
+    st.markdown('<div class="gg-auth-kicker">Gestion Ganadera SENASA</div>', unsafe_allow_html=True)
+    st.title("Inicio de Sesion")
+    st.caption("Acceso privado para gestion sanitaria, trazabilidad y administracion ganadera.")
+    col_form, col_info = st.columns([0.58, 0.42], gap="large")
+    with col_form:
+        with st.form("login"):
+            username = st.text_input("Usuario")
+            password = st.text_input("Clave", type="password")
+            if st.form_submit_button("Ingresar"):
+                username_norm = normalizar_usuario(username)
+                df = fetch_data("SELECT * FROM usuarios WHERE username = ? AND activo = 1", (username_norm,))
+                if not df.empty and verificar_password(password, df["password_hash"].iloc[0]):
+                    if requiere_rehash(df["password_hash"].iloc[0]):
+                        run_query("UPDATE usuarios SET password_hash = ? WHERE id = ?", (hash_password(password), int(df["id"].iloc[0])))
+                        df = fetch_data("SELECT * FROM usuarios WHERE id = ?", (int(df["id"].iloc[0]),))
+                    st.session_state.usuario = df.iloc[0].to_dict()
+                    st.rerun()
+                else:
+                    st.error("Usuario o clave incorrectos")
+    with col_info:
+        st.markdown(
+            """
+            <div class="gg-auth-panel">
+                <div class="gg-auth-panel-title">Sistema ganadero integral</div>
+                <p>Gestiona inventario, sanidad, reproduccion, farmacia, facturacion y reportes desde un unico panel.</p>
+                <p>Si necesitas acceso, solicitalo a un administrador del establecimiento.</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+def render_usuarios_admin():
+    st.title("Usuarios y Seguridad")
+    st.caption("Solo los administradores pueden crear usuarios, cambiar roles, activar accesos o resetear claves.")
+
+    with st.expander("Crear usuario", expanded=True):
+        with st.form("crear_usuario_admin", clear_on_submit=True):
+            c1, c2 = st.columns(2)
+            with c1:
+                username = st.text_input("Usuario")
+                nombre = st.text_input("Nombre completo")
+                rol = st.selectbox("Rol", ROLES_USUARIO, index=1)
+            with c2:
+                password = st.text_input("Clave inicial", type="password")
+                activo = st.checkbox("Activo", value=True)
+            if st.form_submit_button("Crear usuario"):
+                ok, msg = crear_usuario_app(username, password, nombre, rol, activo)
+                if ok:
+                    st.success(msg)
+                else:
+                    st.error(msg)
+
+    usuarios = fetch_data("SELECT id, username, nombre, rol, activo FROM usuarios ORDER BY username")
+    st.dataframe(usuarios, width=1200, hide_index=True)
+
+    if usuarios.empty:
+        return
+
+    st.markdown("### Editar usuario")
+    user_id = st.selectbox(
+        "Usuario",
+        usuarios["id"].tolist(),
+        format_func=lambda uid: usuarios.loc[usuarios["id"] == uid, "username"].iloc[0],
+    )
+    usuario_row = usuarios[usuarios["id"] == user_id].iloc[0]
+
+    with st.form("editar_usuario_admin"):
+        nombre_edit = st.text_input("Nombre", value=str(usuario_row["nombre"] or ""))
+        rol_edit = st.selectbox("Rol", ROLES_USUARIO, index=ROLES_USUARIO.index(usuario_row["rol"]) if usuario_row["rol"] in ROLES_USUARIO else 1)
+        activo_edit = st.checkbox("Activo", value=bool(usuario_row["activo"]))
+        if st.form_submit_button("Guardar cambios"):
+            if actualizar_usuario_app(user_id, nombre_edit, rol_edit, activo_edit):
+                if st.session_state.usuario.get("id") == user_id:
+                    st.session_state.usuario.update({"nombre": nombre_edit, "rol": rol_edit, "activo": int(bool(activo_edit))})
+                st.success("Usuario actualizado.")
+            else:
+                st.error("No se pudo actualizar el usuario.")
+
+    with st.form("reset_password_admin"):
+        nueva = st.text_input("Nueva clave", type="password")
+        nueva2 = st.text_input("Repetir nueva clave", type="password")
+        if st.form_submit_button("Resetear clave"):
+            if nueva != nueva2:
+                st.error("Las claves no coinciden.")
+            else:
+                ok, msg = cambiar_password_usuario_app(user_id, nueva)
+                if ok:
+                    st.success(msg)
+                else:
+                    st.error(msg)
+
+def aplicar_estilo_global():
+    st.markdown(
+        """
+        <style>
+        :root {
+            --gg-bg: #0b1120;
+            --gg-panel: #111827;
+            --gg-panel-2: #162033;
+            --gg-border: #253247;
+            --gg-text: #e5e7eb;
+            --gg-muted: #9ca3af;
+            --gg-green: #22c55e;
+            --gg-teal: #2dd4bf;
+            --gg-gold: #f59e0b;
+            --gg-danger: #f87171;
+        }
+        .stApp {
+            background: var(--gg-bg);
+            color: var(--gg-text);
+        }
+        section[data-testid="stSidebar"] {
+            background: #080d19;
+            border-right: 1px solid var(--gg-border);
+        }
+        section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p {
+            color: var(--gg-text);
+        }
+        section[data-testid="stSidebar"] h1,
+        section[data-testid="stSidebar"] h2,
+        section[data-testid="stSidebar"] h3 {
+            color: var(--gg-green);
+        }
+        .block-container {
+            padding-top: 1.5rem;
+            padding-bottom: 3rem;
+            max-width: 1480px;
+        }
+        [data-testid="stAppViewContainer"] > .main .block-container {
+            background: transparent;
+        }
+        .gg-header {
+            border: 1px solid var(--gg-border);
+            background: #101827;
+            border-radius: 8px;
+            padding: 20px 24px;
+            margin-bottom: 18px;
+            box-shadow: 0 18px 50px rgba(0, 0, 0, 0.22);
+        }
+        .gg-kicker {
+            color: var(--gg-teal);
+            font-size: .76rem;
+            font-weight: 700;
+            letter-spacing: .08em;
+            text-transform: uppercase;
+            margin-bottom: 4px;
+        }
+        .gg-title {
+            color: var(--gg-green);
+            font-size: 1.9rem;
+            font-weight: 800;
+            line-height: 1.15;
+            margin: 0;
+        }
+        .gg-subtitle {
+            color: var(--gg-muted);
+            margin-top: 8px;
+            max-width: 900px;
+        }
+        .gg-auth-kicker {
+            color: var(--gg-teal);
+            font-size: .78rem;
+            font-weight: 800;
+            letter-spacing: .12em;
+            text-transform: uppercase;
+            margin-bottom: 6px;
+        }
+        .gg-auth-panel {
+            background: #111827;
+            border: 1px solid var(--gg-border);
+            border-radius: 8px;
+            padding: 22px;
+            min-height: 220px;
+            box-shadow: 0 18px 50px rgba(0, 0, 0, 0.22);
+        }
+        .gg-auth-panel-title {
+            color: var(--gg-green);
+            font-size: 1.15rem;
+            font-weight: 800;
+            margin-bottom: 10px;
+        }
+        .gg-auth-panel p {
+            color: var(--gg-muted);
+            margin-bottom: 10px;
+            line-height: 1.55;
+        }
+        .st-emotion-cache-1jicfl2, .st-emotion-cache-13ln4jf {
+            padding-top: 2rem;
+        }
+        div[data-testid="stMetric"] {
+            background: var(--gg-panel);
+            border: 1px solid var(--gg-border);
+            border-radius: 8px;
+            padding: 14px 16px;
+            box-shadow: 0 12px 34px rgba(0, 0, 0, 0.18);
+        }
+        div[data-testid="stMetricLabel"] p {
+            color: var(--gg-muted);
+            font-size: .82rem;
+        }
+        div[data-testid="stMetricValue"] {
+            color: var(--gg-green);
+        }
+        div[data-testid="stExpander"] {
+            background: var(--gg-panel);
+            border: 1px solid var(--gg-border);
+            border-radius: 8px;
+        }
+        div[data-testid="stForm"] {
+            background: var(--gg-panel);
+            border: 1px solid var(--gg-border);
+            border-radius: 8px;
+            padding: 22px;
+            box-shadow: 0 18px 50px rgba(0, 0, 0, 0.22);
+        }
+        div[data-testid="stDataFrame"] {
+            border: 1px solid var(--gg-border);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        label, .stTextInput label, .stSelectbox label, .stNumberInput label,
+        .stDateInput label, .stTextArea label, .stRadio label, .stCheckbox label {
+            color: var(--gg-text) !important;
+            font-weight: 700;
+        }
+        input, textarea, [data-baseweb="input"] input {
+            color: #f9fafb !important;
+            background: #0f172a !important;
+        }
+        div[data-baseweb="input"], div[data-baseweb="textarea"], div[data-baseweb="select"] > div {
+            background: #0f172a !important;
+            border-color: #334155 !important;
+            color: #f9fafb !important;
+        }
+        div[data-baseweb="input"]:focus-within, div[data-baseweb="textarea"]:focus-within {
+            border-color: var(--gg-green) !important;
+            box-shadow: 0 0 0 1px rgba(34, 197, 94, .45) !important;
+        }
+        .stButton > button, .stDownloadButton > button, button[kind="primaryFormSubmit"] {
+            border-radius: 6px;
+            border: 1px solid #22c55e;
+            background: #16a34a;
+            color: #06120b;
+            font-weight: 700;
+        }
+        .stButton > button p, .stDownloadButton > button p, button[kind="primaryFormSubmit"] p {
+            color: #06120b;
+        }
+        .stButton > button:hover, .stDownloadButton > button:hover, button[kind="primaryFormSubmit"]:hover {
+            border-color: #86efac;
+            background: #22c55e;
+            color: #06120b;
+        }
+        h1, h2, h3 {
+            color: var(--gg-green);
+        }
+        p, span, div {
+            color: inherit;
+        }
+        [data-testid="stAlert"] {
+            border-radius: 8px;
+        }
+        div[role="radiogroup"] label {
+            color: var(--gg-text) !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+def render_app_header(titulo, subtitulo=None):
+    st.markdown(
+        f"""
+        <div class="gg-header">
+            <div class="gg-kicker">{APP_NAME}</div>
+            <h1 class="gg-title">{titulo}</h1>
+            <div class="gg-subtitle">{subtitulo or APP_SUBTITLE}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+def render_sidebar_usuario():
+    usuario = st.session_state.usuario
+    st.sidebar.markdown(
+        f"""
+        <div style="padding:12px;border:1px solid #253247;border-radius:8px;background:#111827;margin-bottom:12px;">
+            <div style="font-size:.72rem;color:#9ca3af;text-transform:uppercase;font-weight:700;">Sesion</div>
+            <div style="font-weight:800;color:#22c55e;">{usuario['nombre']}</div>
+            <div style="font-size:.85rem;color:#9ca3af;">{usuario['rol']}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 if 'usuario' not in st.session_state:
     st.session_state.usuario = None
 
 # --- UI ---
-st.set_page_config(page_title="Gestion Ganadera SENASA", page_icon="AR", layout="wide")
+st.set_page_config(page_title=APP_NAME, page_icon="AR", layout="wide")
+aplicar_estilo_global()
 
 # Inicializar Supabase si está configurado
 if USAR_SUPABASE:
@@ -581,6 +1134,7 @@ except:
     pass
 
 if st.session_state.usuario is None:
+<<<<<<< HEAD
     st.title("🐄 Gestion Ganadera SENASA")
     st.markdown("### Inicio de Sesion")
     with st.form("login"):
@@ -620,16 +1174,21 @@ if st.session_state.usuario is None:
                             st.success("Cuenta creada")
                         else:
                             st.error("El usuario ya existe")
+=======
+    if requiere_configuracion_inicial():
+        render_setup_inicial()
+    else:
+        render_login()
+>>>>>>> 7bfc336015dc996abe8d46bc9d8714f091f48bf9
     st.stop()
 
-st.sidebar.markdown(f"**Usuario:** {st.session_state.usuario['nombre']} ({st.session_state.usuario['rol']})")
+render_sidebar_usuario()
 if st.sidebar.button("Cerrar Sesion"):
     st.session_state.usuario = None
     st.rerun()
 
-st.markdown("![Logo SENASA](https://upload.wikimedia.org/wikipedia/commons/thumb/c/cc/Logo_Senasa_%28Argentina%29.svg/512px-Logo_Senasa_%28Argentina%29.svg.png)")
-st.sidebar.title("Menu")
-menu = st.sidebar.radio("Navegacion", [
+st.sidebar.markdown("### Menu")
+opciones_menu = [
     "Dashboard Analitico", "Trazabilidad e Inventario", "Propietarios/Clientes",
     "Historia Clinica", "Sanidad y Brucelosis", "Hospitalizacion",
     "Agenda/Citas", "Laboratorio", "Farmacia/Stock",
@@ -639,10 +1198,21 @@ menu = st.sidebar.radio("Navegacion", [
     "Lotes/Potreros", "Finanzas",
     "Alertas y Notificaciones", "Marco Legal y Normativas", "Exportar Reportes (PDF)",
     "BI - Analitica Avanzada"
-])
+]
+if usuario_actual_es_admin():
+    opciones_menu.append("Usuarios y Seguridad")
+menu = st.sidebar.radio("Navegacion", opciones_menu)
+render_app_header(menu)
+
+# ====================== USUARIOS ======================
+if menu == "Usuarios y Seguridad":
+    if usuario_actual_es_admin():
+        render_usuarios_admin()
+    else:
+        st.error("No tenes permisos para administrar usuarios.")
 
 # ====================== DASHBOARD ======================
-if menu == "Dashboard Analitico":
+elif menu == "Dashboard Analitico":
     st.title("Panel de Control")
     crear_backup()
     df_bov = fetch_data("SELECT * FROM bovinos WHERE estado = 'Activo'")
@@ -1104,13 +1674,17 @@ elif menu == "Facturacion":
 
             if st.form_submit_button("Emitir Factura"):
                 if nro_fact and prop_sel:
-                    run_query("INSERT INTO facturacion (numero_factura, propietario_id, fecha_emision, tipo_comprobante, descripcion, subtotal, iva, total, metodo_pago) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                             (nro_fact, prop_sel, fecha_fac, tipo_comp, desc_fac, total_calc, iva, total_calc + iva, metodo))
-                    fact_id = fetch_data("SELECT last_insert_rowid() as id")['id'].iloc[0]
-                    for item in items:
-                        if item[0]:
-                            run_query("INSERT INTO factura_detalle (factura_id, concepto, cantidad, precio_unitario, subtotal) VALUES (?, ?, ?, ?, ?)", (fact_id, item[0], item[1], item[2], item[3]))
-                    st.success(f"Factura {nro_fact} emitida.")
+                    fact_id = run_insert_return_id(
+                        "INSERT INTO facturacion (numero_factura, propietario_id, fecha_emision, tipo_comprobante, descripcion, subtotal, iva, total, metodo_pago) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (nro_fact, prop_sel, fecha_fac, tipo_comp, desc_fac, total_calc, iva, total_calc + iva, metodo),
+                    )
+                    if fact_id:
+                        for item in items:
+                            if item[0]:
+                                run_query("INSERT INTO factura_detalle (factura_id, concepto, cantidad, precio_unitario, subtotal) VALUES (?, ?, ?, ?, ?)", (fact_id, item[0], item[1], item[2], item[3]))
+                        st.success(f"Factura {nro_fact} emitida.")
+                    else:
+                        st.error("No se pudo emitir la factura.")
                 else:
                     st.error("Numero factura y cliente obligatorios")
 
@@ -1328,13 +1902,17 @@ elif menu == "Recetario Digital":
                 meds_data.append((prod, dosis, frec, dur, via))
 
             if st.form_submit_button("Emitir Receta"):
-                run_query("INSERT INTO recetas (caravana, propietario_id, veterinario, fecha_receta, diagnostico, indicaciones, firma_digital) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                         (car_rec, None if prop_rec == "N/A" else prop_rec, st.session_state.usuario['nombre'], fecha_rec, diagnostico, indicaciones, "Firma digital pendiente"))
-                receta_id = fetch_data("SELECT last_insert_rowid() as id")['id'].iloc[0]
-                for md in meds_data:
-                    run_query("INSERT INTO receta_detalle (receta_id, producto_id, dosis, frecuencia, duracion, via_administracion) VALUES (?, ?, ?, ?, ?, ?)",
-                             (receta_id, md[0], md[1], md[2], md[3], md[4]))
-                st.success("Receta emitida.")
+                receta_id = run_insert_return_id(
+                    "INSERT INTO recetas (caravana, propietario_id, veterinario, fecha_receta, diagnostico, indicaciones, firma_digital) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (car_rec, None if prop_rec == "N/A" else prop_rec, st.session_state.usuario['nombre'], fecha_rec, diagnostico, indicaciones, "Firma digital pendiente"),
+                )
+                if receta_id:
+                    for md in meds_data:
+                        run_query("INSERT INTO receta_detalle (receta_id, producto_id, dosis, frecuencia, duracion, via_administracion) VALUES (?, ?, ?, ?, ?, ?)",
+                                 (receta_id, md[0], md[1], md[2], md[3], md[4]))
+                    st.success("Receta emitida.")
+                else:
+                    st.error("No se pudo emitir la receta.")
 
     st.markdown("### Recetas Emitidas")
     df_recetas = fetch_data("""
@@ -1907,56 +2485,62 @@ elif menu == "BI - Analitica Avanzada":
 
 # ====================== EXPORTAR ======================
 elif menu == "Exportar Reportes (PDF)":
-    st.title("Exportar Reportes PDF")
+    st.title("Centro de Exportaciones")
+    st.caption("Genera reportes ejecutivos en PDF y respaldos completos en Excel/CSV.")
+
+    fecha_archivo = datetime.now().strftime("%Y%m%d_%H%M")
     c1, c2 = st.columns(2)
     with c1:
-        st.info("Inventario")
+        st.markdown("### Inventario")
         df1 = fetch_data("SELECT caravana, tipo_identificacion, raza, sexo, categoria, estado FROM bovinos")
         pdf1 = generar_pdf(df1, "Inventario Ganadero")
-        st.download_button("Descargar Inventario", data=pdf1, file_name='Inventario.pdf', mime='application/pdf')
-        st.info("Sanidad")
+        st.download_button("Descargar Inventario PDF", data=pdf1, file_name=f"inventario_ganadero_{fecha_archivo}.pdf", mime='application/pdf')
+
+        st.markdown("### Sanidad")
         df2 = fetch_data("SELECT s.fecha_aplicacion, s.caravana, s.categoria_evento, s.medicamento, b.estatus_brucelosis FROM sanidad s JOIN bovinos b ON s.caravana=b.caravana")
         pdf2 = generar_pdf(df2, "Libro Sanitario")
-        st.download_button("Descargar Sanidad", data=pdf2, file_name='Sanidad.pdf', mime='application/pdf')
+        st.download_button("Descargar Sanidad PDF", data=pdf2, file_name=f"libro_sanitario_{fecha_archivo}.pdf", mime='application/pdf')
     with c2:
-        st.info("Pesajes")
+        st.markdown("### Pesajes")
         df3 = fetch_data("SELECT fecha_pesaje, caravana, peso_kg FROM pesajes")
         pdf3 = generar_pdf(df3, "Pesajes")
-        st.download_button("Descargar Pesajes", data=pdf3, file_name='Pesajes.pdf', mime='application/pdf')
-        st.info("Reproduccion")
+        st.download_button("Descargar Pesajes PDF", data=pdf3, file_name=f"pesajes_{fecha_archivo}.pdf", mime='application/pdf')
+
+        st.markdown("### Reproduccion")
         df4 = fetch_data("SELECT id, caravana_madre, tipo_servicio, fecha_servicio, resultado_tacto, fecha_parto, caravana_cria FROM reproduccion")
         pdf4 = generar_pdf(df4, "Reproduccion")
-        st.download_button("Descargar Reproduccion", data=pdf4, file_name='Reproduccion.pdf', mime='application/pdf')
+        st.download_button("Descargar Reproduccion PDF", data=pdf4, file_name=f"reproduccion_{fecha_archivo}.pdf", mime='application/pdf')
 
     st.markdown("---")
-    st.markdown("### Exportar a CSV / Excel")
+    st.markdown("### Datos completos")
 
     tab_csv, tab_excel = st.tabs(["CSV", "Excel"])
 
     with tab_csv:
-        st.markdown("Selecciona la tabla a exportar:")
-        tabla_csv = st.selectbox("Tabla", ["bovinos", "sanidad", "reproduccion", "pesajes", "farmacia", "stock", "certificados", "intervenciones", "finanzas", "lotes"])
+        tabla_csv = st.selectbox("Tabla", TABLAS_EXPORTABLES)
         df_csv = fetch_data(f"SELECT * FROM {tabla_csv}")
         if not df_csv.empty:
             csv_buffer = io.StringIO()
             df_csv.to_csv(csv_buffer, index=False)
-            st.download_button("Descargar CSV", data=csv_buffer.getvalue(), file_name=f'{tabla_csv}.csv', mime='text/csv')
-            st.dataframe(df_csv.head(10), width=1200, hide_index=True)
+            st.download_button(
+                "Descargar CSV",
+                data=csv_buffer.getvalue().encode("utf-8-sig"),
+                file_name=f"{tabla_csv}_{fecha_archivo}.csv",
+                mime="text/csv",
+            )
+            st.dataframe(df_csv.head(25), use_container_width=True, hide_index=True)
+        else:
+            st.info("La tabla seleccionada no tiene registros.")
 
     with tab_excel:
-        st.markdown("Descarga completa de todas las tablas en un archivo Excel:")
-        if st.button("Generar Excel completo"):
-            with pd.ExcelWriter("exportacion_completa.xlsx", engine='openpyxl') as writer:
-                for tabla in ["bovinos", "sanidad", "reproduccion", "pesajes", "propietarios", "farmacia", "stock", "certificados", "intervenciones", "finanzas", "lotes", "agenda"]:
-                    try:
-                        df = fetch_data(f"SELECT * FROM {tabla}")
-                        df.to_excel(writer, sheet_name=tabla, index=False)
-                    except:
-                        pass
-            with open("exportacion_completa.xlsx", "rb") as f:
-                st.download_button("Descargar Excel", data=f, file_name='exportacion_completa.xlsx', mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-            os.remove("exportacion_completa.xlsx")
-            st.success("Excel generado.")
+        st.write("Incluye una hoja de resumen y una hoja por tabla disponible, con filtros y columnas ajustadas.")
+        excel_bytes = generar_excel_completo(TABLAS_EXPORTABLES)
+        st.download_button(
+            "Descargar Excel completo",
+            data=excel_bytes,
+            file_name=f"exportacion_completa_senasa_{fecha_archivo}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
 
     st.markdown("---")
     st.markdown("### Curva de Crecimiento Individual")
