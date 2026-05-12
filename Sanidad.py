@@ -975,64 +975,96 @@ def render_busqueda_global():
         return
 
     like = f"%{termino.strip()}%"
+    animales = fetch_data(
+        """
+        SELECT b.caravana, b.raza, b.sexo, b.categoria, b.estado, b.estatus_brucelosis,
+               COALESCE(p.nombre || ' ' || p.apellido, 'Sin propietario') as propietario
+        FROM bovinos b LEFT JOIN propietarios p ON b.propietario_id = p.id
+        WHERE b.caravana LIKE ? OR b.raza LIKE ? OR b.categoria LIKE ? OR p.nombre LIKE ? OR p.apellido LIKE ?
+        ORDER BY b.caravana LIMIT 100
+        """,
+        (like, like, like, like, like),
+    )
+    clientes = fetch_data(
+        """
+        SELECT id, nombre, apellido, documento, cuit, telefono, email, localidad, provincia
+        FROM propietarios
+        WHERE nombre LIKE ? OR apellido LIKE ? OR documento LIKE ? OR cuit LIKE ? OR telefono LIKE ? OR email LIKE ?
+        ORDER BY apellido LIMIT 100
+        """,
+        (like, like, like, like, like, like),
+    )
+    clinica = fetch_data(
+        """
+        SELECT fecha_consulta, caravana, motivo_consulta, diagnostico_definitivo, veterinario, observaciones
+        FROM historia_clinica
+        WHERE caravana LIKE ? OR motivo_consulta LIKE ? OR diagnostico_definitivo LIKE ? OR tratamiento LIKE ? OR observaciones LIKE ?
+        ORDER BY fecha_consulta DESC LIMIT 100
+        """,
+        (like, like, like, like, like),
+    )
+    stock = fetch_data(
+        """
+        SELECT f.nombre_producto, f.tipo_producto, f.proveedor, s.lote, s.fecha_vencimiento, s.cantidad, s.ubicacion
+        FROM farmacia f LEFT JOIN stock s ON f.id = s.producto_id
+        WHERE f.nombre_producto LIKE ? OR f.principio_activo LIKE ? OR f.proveedor LIKE ? OR s.lote LIKE ?
+        ORDER BY f.nombre_producto LIMIT 100
+        """,
+        (like, like, like, like),
+    )
+    facturacion = fetch_data(
+        """
+        SELECT fa.numero_factura, fa.fecha_emision, fa.tipo_comprobante, fa.total, fa.estado_pago,
+               COALESCE(p.nombre || ' ' || p.apellido, 'Sin cliente') as cliente
+        FROM facturacion fa LEFT JOIN propietarios p ON fa.propietario_id = p.id
+        WHERE fa.numero_factura LIKE ? OR fa.descripcion LIKE ? OR p.nombre LIKE ? OR p.apellido LIKE ?
+        ORDER BY fa.fecha_emision DESC LIMIT 100
+        """,
+        (like, like, like, like),
+    )
+
+    resultados = {
+        "Animales": animales,
+        "Clientes": clientes,
+        "Clinica": clinica,
+        "Stock": stock,
+        "Facturacion": facturacion,
+    }
+    total = sum(len(df) for df in resultados.values())
+    c1, c2, c3, c4, c5 = st.columns(5)
+    for col, (nombre, df) in zip([c1, c2, c3, c4, c5], resultados.items()):
+        col.metric(nombre, len(df))
+
+    if total == 0:
+        st.warning("No se encontraron coincidencias. Proba con caravana, apellido, producto o numero de factura.")
+        return
+
     tabs = st.tabs(["Animales", "Clientes", "Clinica", "Stock", "Facturacion"])
     with tabs[0]:
-        df = fetch_data(
-            """
-            SELECT b.caravana, b.raza, b.sexo, b.categoria, b.estado, b.estatus_brucelosis,
-                   COALESCE(p.nombre || ' ' || p.apellido, 'Sin propietario') as propietario
-            FROM bovinos b LEFT JOIN propietarios p ON b.propietario_id = p.id
-            WHERE b.caravana LIKE ? OR b.raza LIKE ? OR b.categoria LIKE ? OR p.nombre LIKE ? OR p.apellido LIKE ?
-            ORDER BY b.caravana LIMIT 100
-            """,
-            (like, like, like, like, like),
-        )
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        if animales.empty:
+            st.info("Sin animales encontrados.")
+        else:
+            st.dataframe(animales, use_container_width=True, hide_index=True)
     with tabs[1]:
-        df = fetch_data(
-            """
-            SELECT id, nombre, apellido, documento, cuit, telefono, email, localidad, provincia
-            FROM propietarios
-            WHERE nombre LIKE ? OR apellido LIKE ? OR documento LIKE ? OR cuit LIKE ? OR telefono LIKE ? OR email LIKE ?
-            ORDER BY apellido LIMIT 100
-            """,
-            (like, like, like, like, like, like),
-        )
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        if clientes.empty:
+            st.info("Sin clientes encontrados.")
+        else:
+            st.dataframe(clientes, use_container_width=True, hide_index=True)
     with tabs[2]:
-        df = fetch_data(
-            """
-            SELECT fecha_consulta, caravana, motivo_consulta, diagnostico_definitivo, veterinario, observaciones
-            FROM historia_clinica
-            WHERE caravana LIKE ? OR motivo_consulta LIKE ? OR diagnostico_definitivo LIKE ? OR tratamiento LIKE ? OR observaciones LIKE ?
-            ORDER BY fecha_consulta DESC LIMIT 100
-            """,
-            (like, like, like, like, like),
-        )
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        if clinica.empty:
+            st.info("Sin registros clinicos encontrados.")
+        else:
+            st.dataframe(clinica, use_container_width=True, hide_index=True)
     with tabs[3]:
-        df = fetch_data(
-            """
-            SELECT f.nombre_producto, f.tipo_producto, f.proveedor, s.lote, s.fecha_vencimiento, s.cantidad, s.ubicacion
-            FROM farmacia f LEFT JOIN stock s ON f.id = s.producto_id
-            WHERE f.nombre_producto LIKE ? OR f.principio_activo LIKE ? OR f.proveedor LIKE ? OR s.lote LIKE ?
-            ORDER BY f.nombre_producto LIMIT 100
-            """,
-            (like, like, like, like),
-        )
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        if stock.empty:
+            st.info("Sin productos o lotes encontrados.")
+        else:
+            st.dataframe(stock, use_container_width=True, hide_index=True)
     with tabs[4]:
-        df = fetch_data(
-            """
-            SELECT fa.numero_factura, fa.fecha_emision, fa.tipo_comprobante, fa.total, fa.estado_pago,
-                   COALESCE(p.nombre || ' ' || p.apellido, 'Sin cliente') as cliente
-            FROM facturacion fa LEFT JOIN propietarios p ON fa.propietario_id = p.id
-            WHERE fa.numero_factura LIKE ? OR fa.descripcion LIKE ? OR p.nombre LIKE ? OR p.apellido LIKE ?
-            ORDER BY fa.fecha_emision DESC LIMIT 100
-            """,
-            (like, like, like, like),
-        )
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        if facturacion.empty:
+            st.info("Sin comprobantes encontrados.")
+        else:
+            st.dataframe(facturacion, use_container_width=True, hide_index=True)
 
 def render_portal_cliente():
     render_app_header("Portal del Cliente", "Consulta privada de animales, turnos, certificados, recordatorios y facturacion.")
