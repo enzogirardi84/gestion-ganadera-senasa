@@ -1129,6 +1129,14 @@ def propietario_id_usuario_actual():
     except Exception:
         return None
 
+def fecha_o_hoy(valor):
+    try:
+        if pd.isna(valor):
+            return date.today()
+        return datetime.strptime(str(valor), "%Y-%m-%d").date()
+    except Exception:
+        return date.today()
+
 def crear_usuario_app(username, password, nombre, rol, activo=1, propietario_id=None):
     username = normalizar_usuario(username)
     nombre = str(nombre or "").strip()
@@ -1732,7 +1740,7 @@ elif menu == "Trazabilidad e Inventario":
     render_app_header("Trazabilidad e Inventario", "Registro oficial SIGSA - Res. SENASA 67/2019")
     df_props = fetch_data("SELECT id, nombre, apellido FROM propietarios")
     props_list = ["Sin propietario"] + [f"{r['nombre']} {r['apellido']}" for _, r in df_props.iterrows()]
-    tab_alt, tab_mod = st.tabs(["Alta de Animal", "Modificar Estado"])
+    tab_alt, tab_mod, tab_edit = st.tabs(["Alta de Animal", "Modificar Estado", "Editar Animal"])
     with tab_alt:
         with st.form("form_alta", clear_on_submit=True):
             st.info("A partir de 2026 RFID obligatorio")
@@ -1772,6 +1780,47 @@ elif menu == "Trazabilidad e Inventario":
         else:
             st.warning("No hay animales registrados.")
 
+    with tab_edit:
+        animales_edit = fetch_data("SELECT * FROM bovinos ORDER BY caravana")
+        if animales_edit.empty:
+            st.warning("No hay animales para editar.")
+        else:
+            car_edit = st.selectbox("Animal a editar", animales_edit["caravana"].tolist(), key="animal_edit_sel")
+            animal = animales_edit[animales_edit["caravana"] == car_edit].iloc[0]
+            prop_actual = int(animal["propietario_id"]) if pd.notna(animal["propietario_id"]) else 0
+            prop_ids = [0] + (df_props["id"].tolist() if not df_props.empty else [])
+            prop_index = prop_ids.index(prop_actual) if prop_actual in prop_ids else 0
+            with st.form("form_editar_animal"):
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    tipo_edit = st.selectbox("Tecnologia", ["Visual (Tradicional)", "RFID (Electronica)", "Bolo Ruminal"], index=["Visual (Tradicional)", "RFID (Electronica)", "Bolo Ruminal"].index(animal["tipo_identificacion"]) if animal["tipo_identificacion"] in ["Visual (Tradicional)", "RFID (Electronica)", "Bolo Ruminal"] else 0)
+                    raza_edit = st.text_input("Raza", value=str(animal["raza"] or ""))
+                    sexo_edit = st.selectbox("Sexo", ["Macho", "Hembra"], index=0 if animal["sexo"] == "Macho" else 1)
+                with c2:
+                    categoria_edit = st.text_input("Categoria", value=str(animal["categoria"] or ""))
+                    peso_edit = st.number_input("Peso nacimiento", min_value=0.0, value=float(animal["peso_nacimiento"] or 0), step=1.0)
+                    fecha_edit = st.date_input("Fecha nacimiento", fecha_o_hoy(animal["fecha_nacimiento"]))
+                with c3:
+                    estado_edit = st.selectbox("Estado", ["Activo", "Mortandad", "Venta", "Cambio de Dueno"], index=["Activo", "Mortandad", "Venta", "Cambio de Dueno"].index(animal["estado"]) if animal["estado"] in ["Activo", "Mortandad", "Venta", "Cambio de Dueno"] else 0)
+                    bruc_edit = st.selectbox("Brucelosis", ["Sin Diagnostico", "Negativo", "Positivo", "Sospechoso"], index=["Sin Diagnostico", "Negativo", "Positivo", "Sospechoso"].index(animal["estatus_brucelosis"]) if animal["estatus_brucelosis"] in ["Sin Diagnostico", "Negativo", "Positivo", "Sospechoso"] else 0)
+                    prop_edit = st.selectbox("Propietario", prop_ids, index=prop_index, format_func=lambda i: "Sin propietario" if i == 0 else props_list[prop_ids.index(i)])
+                if st.form_submit_button("Guardar cambios del animal"):
+                    propietario_id = None if prop_edit == 0 else prop_edit
+                    ok = run_query(
+                        """
+                        UPDATE bovinos
+                        SET tipo_identificacion = ?, raza = ?, sexo = ?, categoria = ?, peso_nacimiento = ?,
+                            fecha_nacimiento = ?, estado = ?, estatus_brucelosis = ?, propietario_id = ?
+                        WHERE caravana = ?
+                        """,
+                        (tipo_edit, raza_edit, sexo_edit, categoria_edit, peso_edit, fecha_edit, estado_edit, bruc_edit, propietario_id, car_edit),
+                    )
+                    if ok:
+                        registrar_auditoria("editar_animal", "bovinos", car_edit, f"Estado: {estado_edit} Brucelosis: {bruc_edit}")
+                        st.success("Animal actualizado.")
+                    else:
+                        st.error("No se pudo actualizar el animal.")
+
     st.markdown("### Padron")
     df_inv = fetch_data("""
         SELECT b.caravana, b.tipo_identificacion, b.sexo, b.categoria, b.fecha_nacimiento, b.estatus_brucelosis,
@@ -1784,7 +1833,8 @@ elif menu == "Trazabilidad e Inventario":
 # ====================== PROPIETARIOS ======================
 elif menu == "Propietarios/Clientes":
     render_app_header("Propietarios y Clientes", "Alta y consulta de clientes vinculados a animales, turnos y facturacion.")
-    with st.expander("Nuevo cliente", expanded=True):
+    tab_nuevo_cliente, tab_editar_cliente, tab_listado_clientes = st.tabs(["Nuevo Cliente", "Editar Cliente", "Listado"])
+    with tab_nuevo_cliente:
         with st.form("form_propietario", clear_on_submit=True):
             c1, c2, c3 = st.columns(3)
             with c1:
@@ -1817,8 +1867,49 @@ elif menu == "Propietarios/Clientes":
                 else:
                     st.error("Nombre o apellido es obligatorio.")
 
-    clientes = fetch_data("SELECT id, nombre, apellido, documento, cuit, telefono, email, localidad, provincia, fecha_registro FROM propietarios ORDER BY apellido, nombre")
-    st.dataframe(clientes, use_container_width=True, hide_index=True)
+    clientes = fetch_data("SELECT id, nombre, apellido, documento, cuit, telefono, email, direccion, localidad, provincia, fecha_registro FROM propietarios ORDER BY apellido, nombre")
+    with tab_editar_cliente:
+        if clientes.empty:
+            st.warning("No hay clientes para editar.")
+        else:
+            cliente_sel = st.selectbox(
+                "Cliente",
+                clientes["id"].tolist(),
+                format_func=lambda i: f"{clientes[clientes['id'] == i]['nombre'].values[0]} {clientes[clientes['id'] == i]['apellido'].values[0]}",
+            )
+            cliente = clientes[clientes["id"] == cliente_sel].iloc[0]
+            with st.form("form_editar_propietario"):
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    nombre_edit = st.text_input("Nombre", value=str(cliente["nombre"] or ""))
+                    apellido_edit = st.text_input("Apellido", value=str(cliente["apellido"] or ""))
+                    documento_edit = st.text_input("Documento", value=str(cliente["documento"] or ""))
+                with c2:
+                    cuit_edit = st.text_input("CUIT", value=str(cliente["cuit"] or ""))
+                    telefono_edit = st.text_input("Telefono", value=str(cliente["telefono"] or ""))
+                    email_edit = st.text_input("Email", value=str(cliente["email"] or ""))
+                with c3:
+                    direccion_edit = st.text_input("Direccion", value=str(cliente["direccion"] or ""))
+                    localidad_edit = st.text_input("Localidad", value=str(cliente["localidad"] or ""))
+                    provincia_edit = st.text_input("Provincia", value=str(cliente["provincia"] or ""))
+                if st.form_submit_button("Guardar cambios del cliente"):
+                    ok = run_query(
+                        """
+                        UPDATE propietarios
+                        SET nombre = ?, apellido = ?, documento = ?, telefono = ?, email = ?,
+                            direccion = ?, localidad = ?, provincia = ?, cuit = ?
+                        WHERE id = ?
+                        """,
+                        (nombre_edit, apellido_edit, documento_edit, telefono_edit, email_edit, direccion_edit, localidad_edit, provincia_edit, cuit_edit, cliente_sel),
+                    )
+                    if ok:
+                        registrar_auditoria("editar_propietario", "propietarios", cliente_sel, f"{nombre_edit} {apellido_edit}")
+                        st.success("Cliente actualizado.")
+                    else:
+                        st.error("No se pudo actualizar el cliente.")
+
+    with tab_listado_clientes:
+        st.dataframe(clientes, use_container_width=True, hide_index=True)
 
 # ====================== PIZARRA CLINICA ======================
 elif menu == "Pizarra Clinica":
