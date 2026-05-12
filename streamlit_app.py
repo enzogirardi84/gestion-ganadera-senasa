@@ -1,6 +1,7 @@
-import subprocess
-import sys
 import os
 
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
-subprocess.run([sys.executable, "-m", "streamlit", "run", "Sanidad.py", "--server.port", os.environ.get("PORT", "8501")])
+
+# Streamlit Cloud already runs this file with `streamlit run`.
+# Importing Sanidad executes the app in the same Streamlit process.
+import Sanidad  # noqa: F401,E402

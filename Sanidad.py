@@ -438,18 +438,6 @@ except:
 
 init_db()
 
-# Crear usuario admin por defecto si no existe
-try:
-    run_query("INSERT OR IGNORE INTO usuarios (username, password_hash, nombre, rol) VALUES ('admin', '240be518fabd2724ddb6f04eeb1da5967448d7e831c08c8fa822809f74c720a9', 'Administrador', 'Administrador')")
-except:
-    pass
-
-# Migraciones: agregar columnas faltantes a tablas existentes
-try:
-    run_query("ALTER TABLE bovinos ADD COLUMN propietario_id INTEGER")
-except:
-    pass
-
 def run_query(query, params=()):
     try:
         if USAR_SUPABASE and _supabase:
@@ -465,6 +453,18 @@ def run_query(query, params=()):
         return False
     except Exception as e:
         return False
+
+# Crear usuario admin por defecto si no existe.
+try:
+    run_query("INSERT OR IGNORE INTO usuarios (username, password_hash, nombre, rol) VALUES ('admin', '240be518fabd2724ddb6f04eeb1da5967448d7e831c08c8fa822809f74c720a9', 'Administrador', 'Administrador')")
+except:
+    pass
+
+# Migraciones: agregar columnas faltantes a tablas existentes
+try:
+    run_query("ALTER TABLE bovinos ADD COLUMN propietario_id INTEGER")
+except:
+    pass
 
 def fetch_data(query, params=()):
     if USAR_SUPABASE and _supabase:
