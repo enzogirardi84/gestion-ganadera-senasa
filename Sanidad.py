@@ -1072,6 +1072,29 @@ def aplicar_estilo_global():
         div[role="radiogroup"] label {
             color: var(--gg-text) !important;
         }
+        /* ====== MOBILE ====== */
+        @media (max-width: 768px) {
+            .block-container { padding: 0.8rem; max-width: 100%; }
+            .gg-title { font-size: 1.3rem; }
+            .gg-header { padding: 12px 16px; }
+            button[kind="primary"] { width: 100% !important; }
+            div[data-testid="column"] { min-width: 100% !important; }
+            section[data-testid="stSidebar"] { width: 100% !important; min-width: 100% !important; }
+            [data-testid="stMetric"] { padding: 6px 0; }
+            [data-testid="stMetric"] label { font-size: .7rem; }
+            [data-testid="stMetric"] [data-testid="stMetricValue"] { font-size: 1.2rem; }
+            .stDataFrame { overflow-x: auto; }
+            .stDataFrame table { font-size: .72rem; }
+            input, select, textarea { font-size: 16px !important; }
+            div[data-testid="stExpander"] { font-size: .85rem; }
+            .row-widget.stRadio { flex-direction: column; }
+        }
+        @media (max-width: 480px) {
+            .gg-title { font-size: 1.1rem; }
+            .gg-subtitle { font-size: .8rem; }
+            [data-testid="stMetricValue"] { font-size: 1rem !important; }
+            .stTabs [data-baseweb="tab"] { font-size: .72rem; padding: 8px 10px; }
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -1106,7 +1129,7 @@ if 'usuario' not in st.session_state:
     st.session_state.usuario = None
 
 # --- UI ---
-st.set_page_config(page_title=APP_NAME, page_icon="AR", layout="wide")
+st.set_page_config(page_title=APP_NAME, page_icon="AR", layout="wide", initial_sidebar_state="collapsed")
 aplicar_estilo_global()
 
 # Inicializar Supabase si está configurado
@@ -1134,52 +1157,10 @@ except:
     pass
 
 if st.session_state.usuario is None:
-<<<<<<< HEAD
-    st.title("🐄 Gestion Ganadera SENASA")
-    st.markdown("### Inicio de Sesion")
-    with st.form("login"):
-        username = st.text_input("Usuario")
-        password = st.text_input("Clave", type="password")
-        if st.form_submit_button("Ingresar"):
-            try:
-                conn = sqlite3.connect(DB_NAME)
-                c = conn.cursor()
-                c.execute("SELECT * FROM usuarios WHERE username = ? AND activo = 1", (username,))
-                row = c.fetchone()
-                conn.close()
-                if row and row[2] == hash_password(password):
-                    st.session_state.usuario = {
-                        'id': row[0], 'username': row[1],
-                        'nombre': row[3], 'rol': row[4]
-                    }
-                    st.rerun()
-                else:
-                    st.error("Usuario o clave incorrectos")
-            except:
-                st.error("Error de conexion a la base de datos")
-
-    st.markdown("---")
-    col_reg1, _ = st.columns(2)
-    with col_reg1:
-        with st.expander("Registrarse"):
-            with st.form("registro"):
-                new_user = st.text_input("Usuario nuevo")
-                new_pass = st.text_input("Clave", type="password")
-                new_nombre = st.text_input("Nombre completo")
-                new_rol = st.selectbox("Rol", ["Veterinario", "Administrador", "Tecnico", "Propietario"])
-                if st.form_submit_button("Crear cuenta"):
-                    if new_user and new_pass:
-                        q = "INSERT INTO usuarios (username, password_hash, nombre, rol) VALUES (?, ?, ?, ?)"
-                        if run_query(q, (new_user, hash_password(new_pass), new_nombre, new_rol)):
-                            st.success("Cuenta creada")
-                        else:
-                            st.error("El usuario ya existe")
-=======
     if requiere_configuracion_inicial():
         render_setup_inicial()
     else:
         render_login()
->>>>>>> 7bfc336015dc996abe8d46bc9d8714f091f48bf9
     st.stop()
 
 render_sidebar_usuario()
