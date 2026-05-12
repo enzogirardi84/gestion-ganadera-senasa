@@ -2231,20 +2231,23 @@ elif menu == "Hospitalizacion":
             st.success("No hay animales internados")
 
     with tab_h2:
-        with st.form("form_internacion", clear_on_submit=True):
-            c1, c2 = st.columns(2)
-            with c1:
-                car_int = st.selectbox("Animal", caravanas)
-                motivo = st.text_area("Motivo internacion")
-                diag = st.text_area("Diagnostico ingreso")
-            with c2:
-                trat = st.text_area("Tratamiento")
-                vet_resp = st.text_input("Veterinario responsable", st.session_state.usuario['nombre'])
-            obs = st.text_area("Observaciones")
-            if st.form_submit_button("Internar"):
-                run_query("INSERT INTO hospitalizacion (caravana, motivo, diagnostico_ingreso, tratamiento, veterinario_responsable, observaciones) VALUES (?, ?, ?, ?, ?, ?)",
-                         (car_int, motivo, diag, trat, vet_resp, obs))
-                st.success(f"{car_int} internado.")
+        if not caravanas:
+            st.warning("Primero registra animales activos en Trazabilidad e Inventario para poder internarlos.")
+        else:
+            with st.form("form_internacion", clear_on_submit=True):
+                c1, c2 = st.columns(2)
+                with c1:
+                    car_int = st.selectbox("Animal", caravanas)
+                    motivo = st.text_area("Motivo internacion")
+                    diag = st.text_area("Diagnostico ingreso")
+                with c2:
+                    trat = st.text_area("Tratamiento")
+                    vet_resp = st.text_input("Veterinario responsable", st.session_state.usuario['nombre'])
+                obs = st.text_area("Observaciones")
+                if st.form_submit_button("Internar"):
+                    run_query("INSERT INTO hospitalizacion (caravana, motivo, diagnostico_ingreso, tratamiento, veterinario_responsable, observaciones) VALUES (?, ?, ?, ?, ?, ?)",
+                             (car_int, motivo, diag, trat, vet_resp, obs))
+                    st.success(f"{car_int} internado.")
 
     with tab_h3:
         df_hosp_act = fetch_data("SELECT id, caravana FROM hospitalizacion WHERE estado = 'Internado'")
@@ -2270,6 +2273,8 @@ elif menu == "Hospitalizacion":
             st.markdown("### Historial Kardex")
             df_kardex = fetch_data("SELECT * FROM kardex_hospitalario WHERE hospitalizacion_id = ? ORDER BY fecha DESC", (sel_h,))
             st.dataframe(df_kardex, width=1200, hide_index=True)
+        else:
+            st.info("No hay animales internados para cargar kardex.")
 
 # ====================== AGENDA ======================
 elif menu == "Agenda/Citas":
@@ -2337,20 +2342,23 @@ elif menu == "Laboratorio":
     tab_l1, tab_l2, tab_l3 = st.tabs(["Solicitar Analisis", "Resultados", "Historial"])
 
     with tab_l1:
-        with st.form("form_lab", clear_on_submit=True):
-            c1, c2 = st.columns(2)
-            with c1:
-                car_lab = st.selectbox("Animal", caravanas)
-                tipo = st.selectbox("Tipo analisis", ["Analisis clinico", "Serologia", "Parasitologico", "PCR", "Brucelosis", "Tuberculosis", "Leucosis", "IBR", "BVD", "Coprologico", "Histopatologia", "Otro"])
-                muestra = st.text_input("Tipo de muestra")
-            with c2:
-                fecha_toma = st.date_input("Fecha toma muestra", date.today())
-                lab_ext = st.text_input("Laboratorio externo")
-                soli_por = st.text_input("Solicitado por", st.session_state.usuario['nombre'])
-            if st.form_submit_button("Solicitar"):
-                run_query("INSERT INTO laboratorio (caravana, tipo_analisis, muestra, fecha_toma, solicitado_por, laboratorio_externo) VALUES (?, ?, ?, ?, ?, ?)",
-                         (car_lab, tipo, muestra, fecha_toma, soli_por, lab_ext))
-                st.success("Analisis solicitado.")
+        if not caravanas:
+            st.warning("Primero registra animales activos en Trazabilidad e Inventario para solicitar analisis.")
+        else:
+            with st.form("form_lab", clear_on_submit=True):
+                c1, c2 = st.columns(2)
+                with c1:
+                    car_lab = st.selectbox("Animal", caravanas)
+                    tipo = st.selectbox("Tipo analisis", ["Analisis clinico", "Serologia", "Parasitologico", "PCR", "Brucelosis", "Tuberculosis", "Leucosis", "IBR", "BVD", "Coprologico", "Histopatologia", "Otro"])
+                    muestra = st.text_input("Tipo de muestra")
+                with c2:
+                    fecha_toma = st.date_input("Fecha toma muestra", date.today())
+                    lab_ext = st.text_input("Laboratorio externo")
+                    soli_por = st.text_input("Solicitado por", st.session_state.usuario['nombre'])
+                if st.form_submit_button("Solicitar"):
+                    run_query("INSERT INTO laboratorio (caravana, tipo_analisis, muestra, fecha_toma, solicitado_por, laboratorio_externo) VALUES (?, ?, ?, ?, ?, ?)",
+                             (car_lab, tipo, muestra, fecha_toma, soli_por, lab_ext))
+                    st.success("Analisis solicitado.")
 
     with tab_l2:
         df_labs_pend = fetch_data("SELECT * FROM laboratorio WHERE fecha_resultado IS NULL ORDER BY fecha_solicitud DESC")
@@ -2399,56 +2407,59 @@ elif menu == "Facturacion":
     tab_f1, tab_f2 = st.tabs(["Nueva Factura", "Historial"])
 
     with tab_f1:
-        with st.form("form_factura"):
-            c1, c2 = st.columns(2)
-            with c1:
-                nro_fact = st.text_input("Numero de factura")
-                prop_sel = st.selectbox("Propietario/Cliente", df_props['id'].tolist(),
-                                       format_func=lambda i: f"{df_props[df_props['id']==i]['nombre'].values[0]} {df_props[df_props['id']==i]['apellido'].values[0]} - CUIT: {df_props[df_props['id']==i]['cuit'].values[0]}" if not df_props.empty else "")
-                tipo_comp = st.selectbox("Tipo", ["Factura A", "Factura B", "Factura C", "Recibo", "Presupuesto", "Nota de debito", "Nota de credito"])
-            with c2:
-                fecha_fac = st.date_input("Fecha emision", date.today())
-                metodo = st.selectbox("Metodo pago", ["Efectivo", "Transferencia", "Tarjeta credito", "Tarjeta debito", "Cheque", "Mercado Pago", "Cuenta corriente"])
-                desc_fac = st.text_area("Descripcion")
+        if df_props.empty:
+            st.warning("Primero registra un cliente en Propietarios/Clientes para emitir facturas.")
+        else:
+            with st.form("form_factura"):
+                c1, c2 = st.columns(2)
+                with c1:
+                    nro_fact = st.text_input("Numero de factura")
+                    prop_sel = st.selectbox("Propietario/Cliente", df_props['id'].tolist(),
+                                           format_func=lambda i: f"{df_props[df_props['id']==i]['nombre'].values[0]} {df_props[df_props['id']==i]['apellido'].values[0]} - CUIT: {df_props[df_props['id']==i]['cuit'].values[0]}" if not df_props.empty else "")
+                    tipo_comp = st.selectbox("Tipo", ["Factura A", "Factura B", "Factura C", "Recibo", "Presupuesto", "Nota de debito", "Nota de credito"])
+                with c2:
+                    fecha_fac = st.date_input("Fecha emision", date.today())
+                    metodo = st.selectbox("Metodo pago", ["Efectivo", "Transferencia", "Tarjeta credito", "Tarjeta debito", "Cheque", "Mercado Pago", "Cuenta corriente"])
+                    desc_fac = st.text_area("Descripcion")
 
-            st.markdown("#### Detalle")
-            num_items = st.number_input("Items", 1, 20, 1)
-            items = []
-            total_calc = 0
-            for i in range(num_items):
-                cols = st.columns(4)
-                with cols[0]:
-                    conc = st.text_input("Concepto", key=f"conc_{i}")
-                with cols[1]:
-                    cant = st.number_input("Cant", 1, 9999, 1, key=f"cant_{i}")
-                with cols[2]:
-                    pu = st.number_input("Precio unit", 0.0, 999999.0, 0.0, key=f"pu_{i}")
-                with cols[3]:
-                    sub = cant * pu
-                    st.write(f"Subtotal: ${sub:,.2f}")
-                    total_calc += sub
-                items.append((conc, cant, pu, sub))
+                st.markdown("#### Detalle")
+                num_items = st.number_input("Items", 1, 20, 1)
+                items = []
+                total_calc = 0
+                for i in range(num_items):
+                    cols = st.columns(4)
+                    with cols[0]:
+                        conc = st.text_input("Concepto", key=f"conc_{i}")
+                    with cols[1]:
+                        cant = st.number_input("Cant", 1, 9999, 1, key=f"cant_{i}")
+                    with cols[2]:
+                        pu = st.number_input("Precio unit", 0.0, 999999.0, 0.0, key=f"pu_{i}")
+                    with cols[3]:
+                        sub = cant * pu
+                        st.write(f"Subtotal: ${sub:,.2f}")
+                        total_calc += sub
+                    items.append((conc, cant, pu, sub))
 
-            st.info(f"**TOTAL:** ${total_calc:,.2f}")
-            iva = total_calc * 0.21
-            st.info(f"IVA 21%: ${iva:,.2f}")
-            st.success(f"**TOTAL FINAL:** ${total_calc + iva:,.2f}")
+                st.info(f"**TOTAL:** ${total_calc:,.2f}")
+                iva = total_calc * 0.21
+                st.info(f"IVA 21%: ${iva:,.2f}")
+                st.success(f"**TOTAL FINAL:** ${total_calc + iva:,.2f}")
 
-            if st.form_submit_button("Emitir Factura"):
-                if nro_fact and prop_sel:
-                    fact_id = run_insert_return_id(
-                        "INSERT INTO facturacion (numero_factura, propietario_id, fecha_emision, tipo_comprobante, descripcion, subtotal, iva, total, metodo_pago) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        (nro_fact, prop_sel, fecha_fac, tipo_comp, desc_fac, total_calc, iva, total_calc + iva, metodo),
-                    )
-                    if fact_id:
-                        for item in items:
-                            if item[0]:
-                                run_query("INSERT INTO factura_detalle (factura_id, concepto, cantidad, precio_unitario, subtotal) VALUES (?, ?, ?, ?, ?)", (fact_id, item[0], item[1], item[2], item[3]))
-                        st.success(f"Factura {nro_fact} emitida.")
+                if st.form_submit_button("Emitir Factura"):
+                    if nro_fact and prop_sel:
+                        fact_id = run_insert_return_id(
+                            "INSERT INTO facturacion (numero_factura, propietario_id, fecha_emision, tipo_comprobante, descripcion, subtotal, iva, total, metodo_pago) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            (nro_fact, prop_sel, fecha_fac, tipo_comp, desc_fac, total_calc, iva, total_calc + iva, metodo),
+                        )
+                        if fact_id:
+                            for item in items:
+                                if item[0]:
+                                    run_query("INSERT INTO factura_detalle (factura_id, concepto, cantidad, precio_unitario, subtotal) VALUES (?, ?, ?, ?, ?)", (fact_id, item[0], item[1], item[2], item[3]))
+                            st.success(f"Factura {nro_fact} emitida.")
+                        else:
+                            st.error("No se pudo emitir la factura.")
                     else:
-                        st.error("No se pudo emitir la factura.")
-                else:
-                    st.error("Numero factura y cliente obligatorios")
+                        st.error("Numero factura y cliente obligatorios")
 
     with tab_f2:
         df_fac = fetch_data("""
@@ -2486,6 +2497,8 @@ elif menu == "CRM y Seguimiento":
                     run_query("INSERT INTO crm_interacciones (propietario_id, tipo_interaccion, canal, descripcion, resultado, proximo_seguimiento, veterinario) VALUES (?, ?, ?, ?, ?, ?, ?)",
                              (prop_crm, tipo_int, canal, desc_crm, resultado_crm, prox_seg, st.session_state.usuario['nombre']))
                     st.success("Interaccion registrada.")
+        else:
+            st.warning("Primero registra clientes en Propietarios/Clientes para cargar interacciones.")
 
     with tab_c2:
         df_crm = fetch_data("""
@@ -2517,22 +2530,25 @@ elif menu == "Recordatorios":
     with tab_r1:
         df_props = fetch_data("SELECT id, nombre, apellido, telefono FROM propietarios ORDER BY apellido")
         caravanas = obtener_lista_caravanas()
-        with st.form("form_recordatorio", clear_on_submit=True):
-            c1, c2 = st.columns(2)
-            with c1:
-                prop_rec = st.selectbox("Propietario", df_props['id'].tolist(),
-                                       format_func=lambda i: f"{df_props[df_props['id']==i]['nombre'].values[0]} {df_props[df_props['id']==i]['apellido'].values[0]} - {df_props[df_props['id']==i]['telefono'].values[0]}" if not df_props.empty else "")
-                tipo_rec = st.selectbox("Tipo", ["Vacunacion", "Desparasitacion", "Cita pendiente", "Resultado laboratorio", "Pago pendiente", "Cumpleanios animal", "Seguimiento", "Promocion"])
-                canal_rec = st.selectbox("Canal envio", ["WhatsApp", "SMS", "Email", "Llamada"])
-            with c2:
-                fecha_prog = st.date_input("Fecha programada", date.today())
-                car_rec = st.selectbox("Animal (opcional)", ["N/A"] + caravanas)
-                mensaje = st.text_area("Mensaje personalizado")
+        if df_props.empty:
+            st.warning("Primero registra un cliente en Propietarios/Clientes para programar recordatorios.")
+        else:
+            with st.form("form_recordatorio", clear_on_submit=True):
+                c1, c2 = st.columns(2)
+                with c1:
+                    prop_rec = st.selectbox("Propietario", df_props['id'].tolist(),
+                                           format_func=lambda i: f"{df_props[df_props['id']==i]['nombre'].values[0]} {df_props[df_props['id']==i]['apellido'].values[0]} - {df_props[df_props['id']==i]['telefono'].values[0]}" if not df_props.empty else "")
+                    tipo_rec = st.selectbox("Tipo", ["Vacunacion", "Desparasitacion", "Cita pendiente", "Resultado laboratorio", "Pago pendiente", "Cumpleanios animal", "Seguimiento", "Promocion"])
+                    canal_rec = st.selectbox("Canal envio", ["WhatsApp", "SMS", "Email", "Llamada"])
+                with c2:
+                    fecha_prog = st.date_input("Fecha programada", date.today())
+                    car_rec = st.selectbox("Animal (opcional)", ["N/A"] + caravanas)
+                    mensaje = st.text_area("Mensaje personalizado")
 
-            if st.form_submit_button("Programar Recordatorio"):
-                run_query("INSERT INTO recordatorios (propietario_id, caravana, tipo_recordatorio, fecha_programada, mensaje, canal) VALUES (?, ?, ?, ?, ?, ?)",
-                         (prop_rec, None if car_rec == "N/A" else car_rec, tipo_rec, fecha_prog, mensaje, canal_rec))
-                st.success("Recordatorio programado.")
+                if st.form_submit_button("Programar Recordatorio"):
+                    run_query("INSERT INTO recordatorios (propietario_id, caravana, tipo_recordatorio, fecha_programada, mensaje, canal) VALUES (?, ?, ?, ?, ?, ?)",
+                             (prop_rec, None if car_rec == "N/A" else car_rec, tipo_rec, fecha_prog, mensaje, canal_rec))
+                    st.success("Recordatorio programado.")
 
     with tab_r2:
         df_recs = fetch_data("""
@@ -2611,6 +2627,8 @@ elif menu == "Farmacia/Stock":
                 ORDER BY s.fecha_vencimiento
             """)
             st.dataframe(df_stock, width=1200, hide_index=True)
+        else:
+            st.info("Primero registra productos en la pestaña Productos para poder cargar stock y lotes.")
 
     with tab_f3:
         df_venc = fetch_data("""
@@ -2654,51 +2672,56 @@ elif menu == "Recetario Digital":
     st.title("Recetario Digital")
     caravanas = obtener_lista_caravanas()
     df_props = fetch_data("SELECT id, nombre, apellido FROM propietarios")
+    df_prods = fetch_data("SELECT id, nombre_producto, presentacion FROM farmacia ORDER BY nombre_producto")
 
     with st.expander("Nueva Receta"):
-        with st.form("form_receta", clear_on_submit=True):
-            c1, c2 = st.columns(2)
-            with c1:
-                car_rec = st.selectbox("Animal", caravanas)
-                prop_opts = df_props['id'].tolist()
-                prop_rec = st.selectbox("Propietario", ["N/A"] + prop_opts)
-                diagnostico = st.text_area("Diagnostico")
-            with c2:
-                indicaciones = st.text_area("Indicaciones generales")
-                fecha_rec = st.date_input("Fecha", date.today())
+        if not caravanas:
+            st.warning("Primero registra animales activos en Trazabilidad e Inventario para emitir recetas.")
+        elif df_prods.empty:
+            st.warning("Primero registra productos en Farmacia/Stock para emitir recetas con medicamentos.")
+        else:
+            with st.form("form_receta", clear_on_submit=True):
+                c1, c2 = st.columns(2)
+                with c1:
+                    car_rec = st.selectbox("Animal", caravanas)
+                    prop_opts = df_props['id'].tolist()
+                    prop_rec = st.selectbox("Propietario", ["N/A"] + prop_opts)
+                    diagnostico = st.text_area("Diagnostico")
+                with c2:
+                    indicaciones = st.text_area("Indicaciones generales")
+                    fecha_rec = st.date_input("Fecha", date.today())
 
-            st.markdown("#### Medicamentos")
-            df_prods = fetch_data("SELECT id, nombre_producto, presentacion FROM farmacia ORDER BY nombre_producto")
-            prods_opts = df_prods['id'].tolist()
-            meds_data = []
-            num_meds = st.number_input("Cantidad de medicamentos", min_value=1, max_value=10, value=1)
-            for i in range(num_meds):
-                cols = st.columns(5)
-                with cols[0]:
-                    prod = st.selectbox("Producto", prods_opts, key=f"prod_{i}",
-                                       format_func=lambda x: f"{df_prods[df_prods['id']==x]['nombre_producto'].values[0]}" if not df_prods.empty else "")
-                with cols[1]:
-                    dosis = st.text_input("Dosis", key=f"dosis_{i}")
-                with cols[2]:
-                    frec = st.text_input("Frecuencia", key=f"frec_{i}")
-                with cols[3]:
-                    dur = st.text_input("Duracion", key=f"dur_{i}")
-                with cols[4]:
-                    via = st.selectbox("Via", ["IM", "IV", "SC", "Oral", "Topica"], key=f"via_{i}")
-                meds_data.append((prod, dosis, frec, dur, via))
+                st.markdown("#### Medicamentos")
+                prods_opts = df_prods['id'].tolist()
+                meds_data = []
+                num_meds = st.number_input("Cantidad de medicamentos", min_value=1, max_value=10, value=1)
+                for i in range(num_meds):
+                    cols = st.columns(5)
+                    with cols[0]:
+                        prod = st.selectbox("Producto", prods_opts, key=f"prod_{i}",
+                                           format_func=lambda x: f"{df_prods[df_prods['id']==x]['nombre_producto'].values[0]}" if not df_prods.empty else "")
+                    with cols[1]:
+                        dosis = st.text_input("Dosis", key=f"dosis_{i}")
+                    with cols[2]:
+                        frec = st.text_input("Frecuencia", key=f"frec_{i}")
+                    with cols[3]:
+                        dur = st.text_input("Duracion", key=f"dur_{i}")
+                    with cols[4]:
+                        via = st.selectbox("Via", ["IM", "IV", "SC", "Oral", "Topica"], key=f"via_{i}")
+                    meds_data.append((prod, dosis, frec, dur, via))
 
-            if st.form_submit_button("Emitir Receta"):
-                receta_id = run_insert_return_id(
-                    "INSERT INTO recetas (caravana, propietario_id, veterinario, fecha_receta, diagnostico, indicaciones, firma_digital) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (car_rec, None if prop_rec == "N/A" else prop_rec, st.session_state.usuario['nombre'], fecha_rec, diagnostico, indicaciones, "Firma digital pendiente"),
-                )
-                if receta_id:
-                    for md in meds_data:
-                        run_query("INSERT INTO receta_detalle (receta_id, producto_id, dosis, frecuencia, duracion, via_administracion) VALUES (?, ?, ?, ?, ?, ?)",
-                                 (receta_id, md[0], md[1], md[2], md[3], md[4]))
-                    st.success("Receta emitida.")
-                else:
-                    st.error("No se pudo emitir la receta.")
+                if st.form_submit_button("Emitir Receta"):
+                    receta_id = run_insert_return_id(
+                        "INSERT INTO recetas (caravana, propietario_id, veterinario, fecha_receta, diagnostico, indicaciones, firma_digital) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (car_rec, None if prop_rec == "N/A" else prop_rec, st.session_state.usuario['nombre'], fecha_rec, diagnostico, indicaciones, "Firma digital pendiente"),
+                    )
+                    if receta_id:
+                        for md in meds_data:
+                            run_query("INSERT INTO receta_detalle (receta_id, producto_id, dosis, frecuencia, duracion, via_administracion) VALUES (?, ?, ?, ?, ?, ?)",
+                                     (receta_id, md[0], md[1], md[2], md[3], md[4]))
+                        st.success("Receta emitida.")
+                    else:
+                        st.error("No se pudo emitir la receta.")
 
     st.markdown("### Recetas Emitidas")
     df_recetas = fetch_data("""
