@@ -3,6 +3,7 @@ import sqlite3
 import pandas as pd
 
 DB_NAME = os.environ.get("DB_NAME", "gestion_bovinos_senasa.db")
+DEFAULT_ADMIN_HASH = "240be518fabd2724ddb6f04eeb1da5967448d7e831c08c8fa822809f74c720a9"
 
 def get_connection():
     conn = sqlite3.connect(DB_NAME)
@@ -396,4 +397,11 @@ def init_db():
                 FOREIGN KEY(propietario_id) REFERENCES propietarios(id)
             )
         ''')
+        c.execute(
+            """
+            INSERT OR IGNORE INTO usuarios (username, password_hash, nombre, rol)
+            VALUES (?, ?, ?, ?)
+            """,
+            ("admin", DEFAULT_ADMIN_HASH, "Administrador", "Administrador"),
+        )
         conn.commit()
