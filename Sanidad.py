@@ -13,6 +13,7 @@ import hmac
 import secrets
 import io
 import csv
+import unicodedata
 
 # Configuracion - cambiar a False para usar Supabase
 USAR_SUPABASE = False  # False = SQLite local/cloud | True = Supabase cloud
@@ -23,10 +24,17 @@ SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
 
 DB_NAME = 'gestion_bovinos_senasa.db'
 BACKUP_DIR = 'backups'
+APP_NAME = "Gestion Ganadera SENASA"
+APP_SUBTITLE = "Trazabilidad, sanidad, reproduccion y gestion operativa"
 ROLES_USUARIO = ["Administrador", "Veterinario", "Tecnico", "Propietario"]
 PBKDF2_ITERATIONS = 260000
 DEFAULT_ADMIN_USERNAME = "admin"
 DEFAULT_ADMIN_LEGACY_HASH = "240be518fabd2724ddb6f04eeb1da5967448d7e831c08c8fa822809f74c720a9"
+TABLAS_EXPORTABLES = [
+    "bovinos", "sanidad", "reproduccion", "pesajes", "propietarios",
+    "farmacia", "stock", "certificados", "intervenciones", "finanzas",
+    "lotes", "agenda", "facturacion", "recetas", "alertas",
+]
 
 _supabase = None
 
@@ -506,34 +514,117 @@ def crear_backup():
     shutil.copy2(DB_NAME, backup_file)
     return backup_file
 
+def texto_pdf(valor):
+    texto = "" if valor is None or pd.isna(valor) else str(valor)
+    texto = unicodedata.normalize("NFKD", texto).encode("latin-1", "ignore").decode("latin-1")
+    return texto.replace("\n", " ").replace("\r", " ").strip()
+
+class ReportPDF(FPDF):
+    def __init__(self, titulo):
+        super().__init__(orientation="L", unit="mm", format="A4")
+        self.titulo = texto_pdf(titulo)
+        self.set_auto_page_break(auto=True, margin=14)
+
+    def header(self):
+        self.set_fill_color(17, 94, 89)
+        self.rect(0, 0, 297, 18, "F")
+        self.set_text_color(255, 255, 255)
+        self.set_font("Helvetica", "B", 13)
+        self.cell(0, 8, text=APP_NAME, new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="L")
+        self.set_font("Helvetica", "", 8)
+        self.cell(0, 5, text=self.titulo, new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="L")
+        self.ln(8)
+        self.set_text_color(24, 24, 27)
+
+    def footer(self):
+        self.set_y(-11)
+        self.set_font("Helvetica", "", 7)
+        self.set_text_color(113, 113, 122)
+        generado = datetime.now().strftime("%Y-%m-%d %H:%M")
+        self.cell(0, 6, text=f"Generado {generado} | Pagina {self.page_no()}", align="C")
+        self.set_text_color(24, 24, 27)
+
 def generar_pdf(df, titulo):
-    pdf = FPDF(orientation='L', unit='mm', format='A4')
+    df = df.copy()
+    df.columns = [texto_pdf(c).replace("_", " ").title() for c in df.columns]
+    pdf = ReportPDF(titulo)
     pdf.add_page()
-    pdf.set_font("Helvetica", 'B', 14)
-    pdf.cell(277, 10, text=titulo, new_x=XPos.LMARGIN, new_y=YPos.NEXT, align='C')
-    pdf.ln(5)
+    pdf.set_font("Helvetica", "B", 16)
+    pdf.cell(0, 9, text=texto_pdf(titulo), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.set_font("Helvetica", "", 9)
+    pdf.set_text_color(82, 82, 91)
+    pdf.cell(0, 6, text=f"Registros: {len(df)}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.set_text_color(24, 24, 27)
+    pdf.ln(3)
+
     if df.empty:
-        pdf.set_font("Helvetica", '', 12)
+        pdf.set_font("Helvetica", "", 12)
         pdf.cell(277, 10, text="No hay registros disponibles.", new_x=XPos.LMARGIN, new_y=YPos.NEXT, align='C')
     else:
-        pdf.set_font("Helvetica", 'B', 9)
-        ancho_col = 277 / len(df.columns)
-        alto_fila = 8
+        max_cols = min(len(df.columns), 10)
+        df = df.iloc[:, :max_cols]
+        ancho_col = 277 / max_cols
+        alto_fila = 7
+        pdf.set_fill_color(20, 83, 45)
+        pdf.set_text_color(255, 255, 255)
+        pdf.set_font("Helvetica", "B", 8)
         for col in df.columns:
-            pdf.cell(ancho_col, alto_fila, text=str(col)[:20].capitalize(), border=1, align='C')
+            pdf.cell(ancho_col, alto_fila, text=texto_pdf(col)[:26], border=0, align="C", fill=True)
         pdf.ln(alto_fila)
-        pdf.set_font("Helvetica", '', 8)
-        for _, row in df.iterrows():
+        pdf.set_text_color(24, 24, 27)
+        pdf.set_font("Helvetica", "", 7)
+        for idx, (_, row) in enumerate(df.head(250).iterrows()):
+            fill = idx % 2 == 0
+            pdf.set_fill_color(244, 244, 245) if fill else pdf.set_fill_color(255, 255, 255)
             for item in row:
-                valor = str(item) if pd.notna(item) else "-"
-                pdf.cell(ancho_col, alto_fila, text=valor[:25], border=1, align='C')
+                valor = texto_pdf(item) or "-"
+                pdf.cell(ancho_col, alto_fila, text=valor[:32], border=0, align="L", fill=True)
             pdf.ln(alto_fila)
+        if len(df) > 250:
+            pdf.ln(3)
+            pdf.set_font("Helvetica", "I", 8)
+            pdf.cell(0, 6, text="Vista limitada a 250 registros. Use Excel para el detalle completo.", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         pdf.output(tmp.name)
         with open(tmp.name, "rb") as f:
             pdf_bytes = f.read()
     os.remove(tmp.name)
     return pdf_bytes
+
+def generar_excel_completo(tablas):
+    output = io.BytesIO()
+    resumen = []
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        for tabla in tablas:
+            try:
+                df = fetch_data(f"SELECT * FROM {tabla}")
+            except Exception:
+                continue
+            sheet = tabla[:31]
+            df.to_excel(writer, sheet_name=sheet, index=False)
+            resumen.append({"Tabla": tabla, "Registros": len(df), "Columnas": len(df.columns)})
+
+            ws = writer.book[sheet]
+            ws.freeze_panes = "A2"
+            ws.auto_filter.ref = ws.dimensions
+            for cell in ws[1]:
+                cell.font = cell.font.copy(bold=True, color="FFFFFF")
+                cell.fill = cell.fill.copy(fill_type="solid", fgColor="14532D")
+            for column_cells in ws.columns:
+                max_len = max(len(str(cell.value or "")) for cell in column_cells)
+                ws.column_dimensions[column_cells[0].column_letter].width = min(max(max_len + 2, 12), 38)
+
+        pd.DataFrame(resumen).to_excel(writer, sheet_name="Resumen", index=False)
+        ws = writer.book["Resumen"]
+        ws.freeze_panes = "A2"
+        ws.auto_filter.ref = ws.dimensions
+        for cell in ws[1]:
+            cell.font = cell.font.copy(bold=True, color="FFFFFF")
+            cell.fill = cell.fill.copy(fill_type="solid", fgColor="115E59")
+        for column_cells in ws.columns:
+            max_len = max(len(str(cell.value or "")) for cell in column_cells)
+            ws.column_dimensions[column_cells[0].column_letter].width = min(max(max_len + 2, 12), 32)
+    return output.getvalue()
 
 def verificar_alertas():
     bovinos = fetch_data("SELECT caravana, fecha_nacimiento, estatus_brucelosis FROM bovinos WHERE estado = 'Activo'")
@@ -778,11 +869,149 @@ def render_usuarios_admin():
                 else:
                     st.error(msg)
 
+def aplicar_estilo_global():
+    st.markdown(
+        """
+        <style>
+        :root {
+            --gg-bg: #f7f8f5;
+            --gg-panel: #ffffff;
+            --gg-border: #d9ded4;
+            --gg-text: #1f2933;
+            --gg-muted: #647067;
+            --gg-green: #14532d;
+            --gg-teal: #115e59;
+            --gg-gold: #b7791f;
+        }
+        .stApp {
+            background:
+                linear-gradient(180deg, rgba(20,83,45,0.07), rgba(255,255,255,0) 280px),
+                var(--gg-bg);
+            color: var(--gg-text);
+        }
+        section[data-testid="stSidebar"] {
+            background: #ffffff;
+            border-right: 1px solid var(--gg-border);
+        }
+        section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p {
+            color: var(--gg-text);
+        }
+        section[data-testid="stSidebar"] h1,
+        section[data-testid="stSidebar"] h2,
+        section[data-testid="stSidebar"] h3 {
+            color: var(--gg-green);
+        }
+        .block-container {
+            padding-top: 1.5rem;
+            padding-bottom: 3rem;
+            max-width: 1480px;
+        }
+        .gg-header {
+            border: 1px solid var(--gg-border);
+            background: linear-gradient(135deg, #ffffff 0%, #eef7f0 100%);
+            border-radius: 8px;
+            padding: 20px 24px;
+            margin-bottom: 18px;
+            box-shadow: 0 12px 34px rgba(15, 23, 42, 0.06);
+        }
+        .gg-kicker {
+            color: var(--gg-teal);
+            font-size: .76rem;
+            font-weight: 700;
+            letter-spacing: .08em;
+            text-transform: uppercase;
+            margin-bottom: 4px;
+        }
+        .gg-title {
+            color: var(--gg-green);
+            font-size: 1.9rem;
+            font-weight: 800;
+            line-height: 1.15;
+            margin: 0;
+        }
+        .gg-subtitle {
+            color: var(--gg-muted);
+            margin-top: 8px;
+            max-width: 900px;
+        }
+        div[data-testid="stMetric"] {
+            background: var(--gg-panel);
+            border: 1px solid var(--gg-border);
+            border-radius: 8px;
+            padding: 14px 16px;
+            box-shadow: 0 8px 22px rgba(15, 23, 42, 0.045);
+        }
+        div[data-testid="stMetricLabel"] p {
+            color: var(--gg-muted);
+            font-size: .82rem;
+        }
+        div[data-testid="stMetricValue"] {
+            color: var(--gg-green);
+        }
+        div[data-testid="stExpander"] {
+            background: var(--gg-panel);
+            border: 1px solid var(--gg-border);
+            border-radius: 8px;
+        }
+        div[data-testid="stDataFrame"] {
+            border: 1px solid var(--gg-border);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        .stButton > button, .stDownloadButton > button, button[kind="primaryFormSubmit"] {
+            border-radius: 6px;
+            border: 1px solid #0f5132;
+            background: #14532d;
+            color: white;
+            font-weight: 700;
+        }
+        .stButton > button p, .stDownloadButton > button p, button[kind="primaryFormSubmit"] p {
+            color: white;
+        }
+        .stButton > button:hover, .stDownloadButton > button:hover, button[kind="primaryFormSubmit"]:hover {
+            border-color: #115e59;
+            background: #115e59;
+            color: white;
+        }
+        h1, h2, h3 {
+            color: var(--gg-green);
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+def render_app_header(titulo, subtitulo=None):
+    st.markdown(
+        f"""
+        <div class="gg-header">
+            <div class="gg-kicker">{APP_NAME}</div>
+            <h1 class="gg-title">{titulo}</h1>
+            <div class="gg-subtitle">{subtitulo or APP_SUBTITLE}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+def render_sidebar_usuario():
+    usuario = st.session_state.usuario
+    st.sidebar.markdown(
+        f"""
+        <div style="padding:12px;border:1px solid #d9ded4;border-radius:8px;background:#f8faf6;margin-bottom:12px;">
+            <div style="font-size:.72rem;color:#647067;text-transform:uppercase;font-weight:700;">Sesion</div>
+            <div style="font-weight:800;color:#14532d;">{usuario['nombre']}</div>
+            <div style="font-size:.85rem;color:#647067;">{usuario['rol']}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
 if 'usuario' not in st.session_state:
     st.session_state.usuario = None
 
 # --- UI ---
-st.set_page_config(page_title="Gestion Ganadera SENASA", page_icon="AR", layout="wide")
+st.set_page_config(page_title=APP_NAME, page_icon="AR", layout="wide")
+aplicar_estilo_global()
 
 # Inicializar Supabase si está configurado
 if USAR_SUPABASE:
@@ -815,13 +1044,12 @@ if st.session_state.usuario is None:
         render_login()
     st.stop()
 
-st.sidebar.markdown(f"**Usuario:** {st.session_state.usuario['nombre']} ({st.session_state.usuario['rol']})")
+render_sidebar_usuario()
 if st.sidebar.button("Cerrar Sesion"):
     st.session_state.usuario = None
     st.rerun()
 
-st.markdown("![Logo SENASA](https://upload.wikimedia.org/wikipedia/commons/thumb/c/cc/Logo_Senasa_%28Argentina%29.svg/512px-Logo_Senasa_%28Argentina%29.svg.png)")
-st.sidebar.title("Menu")
+st.sidebar.markdown("### Menu")
 opciones_menu = [
     "Dashboard Analitico", "Trazabilidad e Inventario", "Propietarios/Clientes",
     "Historia Clinica", "Sanidad y Brucelosis", "Hospitalizacion",
@@ -836,6 +1064,7 @@ opciones_menu = [
 if usuario_actual_es_admin():
     opciones_menu.append("Usuarios y Seguridad")
 menu = st.sidebar.radio("Navegacion", opciones_menu)
+render_app_header(menu)
 
 # ====================== USUARIOS ======================
 if menu == "Usuarios y Seguridad":
@@ -2118,56 +2347,62 @@ elif menu == "BI - Analitica Avanzada":
 
 # ====================== EXPORTAR ======================
 elif menu == "Exportar Reportes (PDF)":
-    st.title("Exportar Reportes PDF")
+    st.title("Centro de Exportaciones")
+    st.caption("Genera reportes ejecutivos en PDF y respaldos completos en Excel/CSV.")
+
+    fecha_archivo = datetime.now().strftime("%Y%m%d_%H%M")
     c1, c2 = st.columns(2)
     with c1:
-        st.info("Inventario")
+        st.markdown("### Inventario")
         df1 = fetch_data("SELECT caravana, tipo_identificacion, raza, sexo, categoria, estado FROM bovinos")
         pdf1 = generar_pdf(df1, "Inventario Ganadero")
-        st.download_button("Descargar Inventario", data=pdf1, file_name='Inventario.pdf', mime='application/pdf')
-        st.info("Sanidad")
+        st.download_button("Descargar Inventario PDF", data=pdf1, file_name=f"inventario_ganadero_{fecha_archivo}.pdf", mime='application/pdf')
+
+        st.markdown("### Sanidad")
         df2 = fetch_data("SELECT s.fecha_aplicacion, s.caravana, s.categoria_evento, s.medicamento, b.estatus_brucelosis FROM sanidad s JOIN bovinos b ON s.caravana=b.caravana")
         pdf2 = generar_pdf(df2, "Libro Sanitario")
-        st.download_button("Descargar Sanidad", data=pdf2, file_name='Sanidad.pdf', mime='application/pdf')
+        st.download_button("Descargar Sanidad PDF", data=pdf2, file_name=f"libro_sanitario_{fecha_archivo}.pdf", mime='application/pdf')
     with c2:
-        st.info("Pesajes")
+        st.markdown("### Pesajes")
         df3 = fetch_data("SELECT fecha_pesaje, caravana, peso_kg FROM pesajes")
         pdf3 = generar_pdf(df3, "Pesajes")
-        st.download_button("Descargar Pesajes", data=pdf3, file_name='Pesajes.pdf', mime='application/pdf')
-        st.info("Reproduccion")
+        st.download_button("Descargar Pesajes PDF", data=pdf3, file_name=f"pesajes_{fecha_archivo}.pdf", mime='application/pdf')
+
+        st.markdown("### Reproduccion")
         df4 = fetch_data("SELECT id, caravana_madre, tipo_servicio, fecha_servicio, resultado_tacto, fecha_parto, caravana_cria FROM reproduccion")
         pdf4 = generar_pdf(df4, "Reproduccion")
-        st.download_button("Descargar Reproduccion", data=pdf4, file_name='Reproduccion.pdf', mime='application/pdf')
+        st.download_button("Descargar Reproduccion PDF", data=pdf4, file_name=f"reproduccion_{fecha_archivo}.pdf", mime='application/pdf')
 
     st.markdown("---")
-    st.markdown("### Exportar a CSV / Excel")
+    st.markdown("### Datos completos")
 
     tab_csv, tab_excel = st.tabs(["CSV", "Excel"])
 
     with tab_csv:
-        st.markdown("Selecciona la tabla a exportar:")
-        tabla_csv = st.selectbox("Tabla", ["bovinos", "sanidad", "reproduccion", "pesajes", "farmacia", "stock", "certificados", "intervenciones", "finanzas", "lotes"])
+        tabla_csv = st.selectbox("Tabla", TABLAS_EXPORTABLES)
         df_csv = fetch_data(f"SELECT * FROM {tabla_csv}")
         if not df_csv.empty:
             csv_buffer = io.StringIO()
             df_csv.to_csv(csv_buffer, index=False)
-            st.download_button("Descargar CSV", data=csv_buffer.getvalue(), file_name=f'{tabla_csv}.csv', mime='text/csv')
-            st.dataframe(df_csv.head(10), width=1200, hide_index=True)
+            st.download_button(
+                "Descargar CSV",
+                data=csv_buffer.getvalue().encode("utf-8-sig"),
+                file_name=f"{tabla_csv}_{fecha_archivo}.csv",
+                mime="text/csv",
+            )
+            st.dataframe(df_csv.head(25), use_container_width=True, hide_index=True)
+        else:
+            st.info("La tabla seleccionada no tiene registros.")
 
     with tab_excel:
-        st.markdown("Descarga completa de todas las tablas en un archivo Excel:")
-        if st.button("Generar Excel completo"):
-            with pd.ExcelWriter("exportacion_completa.xlsx", engine='openpyxl') as writer:
-                for tabla in ["bovinos", "sanidad", "reproduccion", "pesajes", "propietarios", "farmacia", "stock", "certificados", "intervenciones", "finanzas", "lotes", "agenda"]:
-                    try:
-                        df = fetch_data(f"SELECT * FROM {tabla}")
-                        df.to_excel(writer, sheet_name=tabla, index=False)
-                    except:
-                        pass
-            with open("exportacion_completa.xlsx", "rb") as f:
-                st.download_button("Descargar Excel", data=f, file_name='exportacion_completa.xlsx', mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-            os.remove("exportacion_completa.xlsx")
-            st.success("Excel generado.")
+        st.write("Incluye una hoja de resumen y una hoja por tabla disponible, con filtros y columnas ajustadas.")
+        excel_bytes = generar_excel_completo(TABLAS_EXPORTABLES)
+        st.download_button(
+            "Descargar Excel completo",
+            data=excel_bytes,
+            file_name=f"exportacion_completa_senasa_{fecha_archivo}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
 
     st.markdown("---")
     st.markdown("### Curva de Crecimiento Individual")
