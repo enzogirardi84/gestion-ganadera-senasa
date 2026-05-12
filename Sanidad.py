@@ -35,7 +35,7 @@ TABLAS_EXPORTABLES = [
     "farmacia", "stock", "certificados", "intervenciones", "finanzas",
     "lotes", "agenda", "facturacion", "recetas", "alertas",
     "ehr_templates", "ehr_template_items", "workflow_pacientes", "workflow_tareas",
-    "ordenes_compra", "automation_log",
+    "ordenes_compra", "automation_log", "audit_log",
 ]
 
 _supabase = None
@@ -490,6 +490,18 @@ def init_db():
             )
         ''')
         c.execute('''
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                usuario TEXT,
+                rol TEXT,
+                accion TEXT,
+                entidad TEXT,
+                entidad_id TEXT,
+                detalle TEXT,
+                creado_en DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        c.execute('''
             CREATE TABLE IF NOT EXISTS lotes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 nombre TEXT,
@@ -755,6 +767,15 @@ def log_automatizacion(evento, entidad, entidad_id, detalle):
         (evento, entidad, entidad_id, detalle),
     )
 
+def registrar_auditoria(accion, entidad, entidad_id="", detalle=""):
+    usuario = st.session_state.get("usuario") if hasattr(st, "session_state") else None
+    nombre = str((usuario or {}).get("username") or (usuario or {}).get("nombre") or "sistema")
+    rol = str((usuario or {}).get("rol") or "sistema")
+    run_query(
+        "INSERT INTO audit_log (usuario, rol, accion, entidad, entidad_id, detalle) VALUES (?, ?, ?, ?, ?, ?)",
+        (nombre, rol, accion, entidad, str(entidad_id or ""), str(detalle or "")),
+    )
+
 def sembrar_templates_ehr():
     templates = [
         {
@@ -884,6 +905,73 @@ def revisar_reorden_stock():
                 (int(row["producto_id"]), row["proveedor"], sugerida, f"Stock bajo: {row['nombre_producto']}"),
             )
             log_automatizacion("reorden_stock", "stock", int(row["producto_id"]), "Orden de compra borrador generada")
+
+def render_busqueda_global():
+    render_app_header("Busqueda Global", "Encontrar rapido animales, clientes, historia clinica, stock y facturas.")
+    termino = st.text_input("Buscar", placeholder="Caravana, cliente, producto, diagnostico, factura...")
+    if not termino or len(termino.strip()) < 2:
+        st.info("Escribi al menos 2 caracteres para buscar en todo el sistema.")
+        return
+
+    like = f"%{termino.strip()}%"
+    tabs = st.tabs(["Animales", "Clientes", "Clinica", "Stock", "Facturacion"])
+    with tabs[0]:
+        df = fetch_data(
+            """
+            SELECT b.caravana, b.raza, b.sexo, b.categoria, b.estado, b.estatus_brucelosis,
+                   COALESCE(p.nombre || ' ' || p.apellido, 'Sin propietario') as propietario
+            FROM bovinos b LEFT JOIN propietarios p ON b.propietario_id = p.id
+            WHERE b.caravana LIKE ? OR b.raza LIKE ? OR b.categoria LIKE ? OR p.nombre LIKE ? OR p.apellido LIKE ?
+            ORDER BY b.caravana LIMIT 100
+            """,
+            (like, like, like, like, like),
+        )
+        st.dataframe(df, use_container_width=True, hide_index=True)
+    with tabs[1]:
+        df = fetch_data(
+            """
+            SELECT id, nombre, apellido, dni_cuit, telefono, email, establecimiento, localidad
+            FROM propietarios
+            WHERE nombre LIKE ? OR apellido LIKE ? OR dni_cuit LIKE ? OR telefono LIKE ? OR email LIKE ? OR establecimiento LIKE ?
+            ORDER BY apellido LIMIT 100
+            """,
+            (like, like, like, like, like, like),
+        )
+        st.dataframe(df, use_container_width=True, hide_index=True)
+    with tabs[2]:
+        df = fetch_data(
+            """
+            SELECT fecha_consulta, caravana, motivo_consulta, diagnostico_definitivo, veterinario, observaciones
+            FROM historia_clinica
+            WHERE caravana LIKE ? OR motivo_consulta LIKE ? OR diagnostico_definitivo LIKE ? OR tratamiento LIKE ? OR observaciones LIKE ?
+            ORDER BY fecha_consulta DESC LIMIT 100
+            """,
+            (like, like, like, like, like),
+        )
+        st.dataframe(df, use_container_width=True, hide_index=True)
+    with tabs[3]:
+        df = fetch_data(
+            """
+            SELECT f.nombre_producto, f.tipo_producto, f.proveedor, s.lote, s.fecha_vencimiento, s.cantidad, s.ubicacion
+            FROM farmacia f LEFT JOIN stock s ON f.id = s.producto_id
+            WHERE f.nombre_producto LIKE ? OR f.principio_activo LIKE ? OR f.proveedor LIKE ? OR s.lote LIKE ?
+            ORDER BY f.nombre_producto LIMIT 100
+            """,
+            (like, like, like, like),
+        )
+        st.dataframe(df, use_container_width=True, hide_index=True)
+    with tabs[4]:
+        df = fetch_data(
+            """
+            SELECT fa.numero_factura, fa.fecha_factura, fa.tipo_comprobante, fa.total, fa.estado,
+                   COALESCE(p.nombre || ' ' || p.apellido, 'Sin cliente') as cliente
+            FROM facturacion fa LEFT JOIN propietarios p ON fa.propietario_id = p.id
+            WHERE fa.numero_factura LIKE ? OR fa.descripcion LIKE ? OR p.nombre LIKE ? OR p.apellido LIKE ?
+            ORDER BY fa.fecha_factura DESC LIMIT 100
+            """,
+            (like, like, like, like),
+        )
+        st.dataframe(df, use_container_width=True, hide_index=True)
 
 # --- USUARIOS ---
 def hash_password(password):
@@ -1073,6 +1161,7 @@ def render_usuarios_admin():
             if st.form_submit_button("Crear usuario"):
                 ok, msg = crear_usuario_app(username, password, nombre, rol, activo)
                 if ok:
+                    registrar_auditoria("crear_usuario", "usuarios", username, f"Rol: {rol}")
                     st.success(msg)
                 else:
                     st.error(msg)
@@ -1099,6 +1188,7 @@ def render_usuarios_admin():
             if actualizar_usuario_app(user_id, nombre_edit, rol_edit, activo_edit):
                 if st.session_state.usuario.get("id") == user_id:
                     st.session_state.usuario.update({"nombre": nombre_edit, "rol": rol_edit, "activo": int(bool(activo_edit))})
+                registrar_auditoria("actualizar_usuario", "usuarios", user_id, f"Rol: {rol_edit} Activo: {int(bool(activo_edit))}")
                 st.success("Usuario actualizado.")
             else:
                 st.error("No se pudo actualizar el usuario.")
@@ -1112,9 +1202,16 @@ def render_usuarios_admin():
             else:
                 ok, msg = cambiar_password_usuario_app(user_id, nueva)
                 if ok:
+                    registrar_auditoria("reset_password", "usuarios", user_id, "Clave actualizada por administrador")
                     st.success(msg)
                 else:
                     st.error(msg)
+
+    with st.expander("Auditoria del sistema"):
+        auditoria = fetch_data(
+            "SELECT creado_en, usuario, rol, accion, entidad, entidad_id, detalle FROM audit_log ORDER BY creado_en DESC LIMIT 200"
+        )
+        st.dataframe(auditoria, use_container_width=True, hide_index=True)
 
 def aplicar_estilo_global():
     st.markdown(
@@ -1409,7 +1506,7 @@ if st.sidebar.button("Cerrar Sesion"):
 
 st.sidebar.markdown("### Menu")
 opciones_menu = [
-    "Dashboard Analitico", "Trazabilidad e Inventario", "Propietarios/Clientes",
+    "Dashboard Analitico", "Busqueda Global", "Trazabilidad e Inventario", "Propietarios/Clientes",
     "Pizarra Clinica", "Historia Clinica", "Sanidad y Brucelosis", "Hospitalizacion",
     "Agenda/Citas", "Laboratorio", "Farmacia/Stock",
     "Recetario Digital", "Facturacion", "CRM y Seguimiento",
@@ -1494,6 +1591,10 @@ elif menu == "Dashboard Analitico":
     else:
         st.info("Sistema sin registros")
 
+# ====================== BUSQUEDA GLOBAL ======================
+elif menu == "Busqueda Global":
+    render_busqueda_global()
+
 # ====================== TRAZABILIDAD ======================
 elif menu == "Trazabilidad e Inventario":
     render_app_header("Trazabilidad e Inventario", "Registro oficial SIGSA - Res. SENASA 67/2019")
@@ -1519,6 +1620,7 @@ elif menu == "Trazabilidad e Inventario":
                     prop_id = None if prop_idx == 0 else df_props.iloc[prop_idx - 1]['id']
                     q = "INSERT INTO bovinos (caravana, tipo_identificacion, raza, sexo, categoria, peso_nacimiento, fecha_nacimiento, propietario_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
                     if run_query(q, (caravana.upper(), tipo_id, raza, sexo, categoria, peso_nac, fecha_nac, prop_id)):
+                        registrar_auditoria("crear_animal", "bovinos", caravana.upper(), f"Categoria: {categoria}")
                         st.success(f"Animal {caravana.upper()} registrado.")
                     else:
                         st.error("La caravana ya existe.")
@@ -1533,6 +1635,7 @@ elif menu == "Trazabilidad e Inventario":
                 nuevo_estado = st.selectbox("Estado", ["Activo", "Mortandad", "Venta", "Cambio de Dueno"])
                 if st.form_submit_button("Actualizar"):
                     run_query("UPDATE bovinos SET estado = ? WHERE caravana = ?", (nuevo_estado, car_sel))
+                    registrar_auditoria("actualizar_estado_animal", "bovinos", car_sel, nuevo_estado)
                     st.success("Actualizado.")
         else:
             st.warning("No hay animales registrados.")
@@ -1578,6 +1681,7 @@ elif menu == "Pizarra Clinica":
                     """,
                     (car_w, estado_w, responsable_w, prioridad_w, obs_w),
                 )
+                registrar_auditoria("actualizar_pizarra", "workflow_pacientes", car_w, f"{estado_w} - {prioridad_w}")
                 st.success("Estado actualizado.")
 
         df_flow = fetch_data("SELECT * FROM workflow_pacientes ORDER BY actualizado_en DESC")
@@ -1605,6 +1709,7 @@ elif menu == "Pizarra Clinica":
                     "INSERT INTO workflow_tareas (caravana, tarea, asignado_a, vence_en) VALUES (?, ?, ?, ?)",
                     (car_t, tarea, asignado, vence),
                 )
+                registrar_auditoria("crear_tarea_clinica", "workflow_tareas", car_t, tarea)
                 st.success("Tarea creada.")
         df_tareas = fetch_data("SELECT * FROM workflow_tareas ORDER BY estado, vence_en")
         st.dataframe(df_tareas, use_container_width=True, hide_index=True)
@@ -1662,6 +1767,7 @@ elif menu == "Historia Clinica":
                     )
                     if consulta_id:
                         aplicar_automatizaciones_consulta(consulta_id, car_sel, tpl_id)
+                        registrar_auditoria("crear_historia_clinica", "historia_clinica", consulta_id, f"Paciente: {car_sel}")
                         st.success("Consulta registrada. Automatizaciones aplicadas.")
                     else:
                         st.error("No se pudo guardar la consulta.")
@@ -1672,6 +1778,56 @@ elif menu == "Historia Clinica":
                 template_sel = st.selectbox("Plantilla para ver reglas", templates["id"].tolist(), format_func=lambda x: templates.loc[templates["id"] == x, "nombre"].iloc[0])
                 reglas = fetch_data("SELECT concepto, cantidad, precio_unitario, stock_cantidad, recordatorio_meses, recordatorio_mensaje FROM ehr_template_items WHERE template_id = ?", (template_sel,))
                 st.dataframe(reglas, use_container_width=True, hide_index=True)
+                with st.form("form_regla_template", clear_on_submit=True):
+                    st.markdown("#### Agregar regla")
+                    c1, c2, c3 = st.columns(3)
+                    with c1:
+                        concepto = st.text_input("Concepto")
+                        cantidad = st.number_input("Cantidad", min_value=1.0, value=1.0, step=1.0)
+                    with c2:
+                        precio = st.number_input("Precio unitario", min_value=0.0, value=0.0, step=100.0)
+                        stock_cant = st.number_input("Descontar stock", min_value=0, value=0, step=1)
+                    with c3:
+                        meses = st.number_input("Recordatorio en meses", min_value=0, value=0, step=1)
+                        mensaje = st.text_input("Mensaje recordatorio")
+                    if st.form_submit_button("Agregar regla"):
+                        if concepto.strip():
+                            run_query(
+                                """
+                                INSERT INTO ehr_template_items
+                                (template_id, concepto, cantidad, precio_unitario, stock_cantidad, recordatorio_meses, recordatorio_mensaje)
+                                VALUES (?, ?, ?, ?, ?, ?, ?)
+                                """,
+                                (template_sel, concepto.strip(), cantidad, precio, stock_cant, meses, mensaje),
+                            )
+                            registrar_auditoria("crear_regla_template", "ehr_template_items", template_sel, concepto)
+                            st.success("Regla agregada.")
+                        else:
+                            st.error("El concepto es obligatorio.")
+            with st.form("form_template_ehr", clear_on_submit=True):
+                st.markdown("#### Crear plantilla SOAP")
+                nombre_tpl = st.text_input("Nombre de plantilla")
+                motivo_tpl = st.text_area("Motivo")
+                c1, c2 = st.columns(2)
+                with c1:
+                    subj_tpl = st.text_area("S - Subjetivo")
+                    obj_tpl = st.text_area("O - Objetivo")
+                with c2:
+                    ana_tpl = st.text_area("A - Analisis")
+                    plan_tpl = st.text_area("P - Plan")
+                if st.form_submit_button("Crear plantilla"):
+                    if nombre_tpl.strip():
+                        ok = run_query(
+                            "INSERT INTO ehr_templates (nombre, motivo, subjetivo, objetivo, analisis, plan) VALUES (?, ?, ?, ?, ?, ?)",
+                            (nombre_tpl.strip(), motivo_tpl, subj_tpl, obj_tpl, ana_tpl, plan_tpl),
+                        )
+                        if ok:
+                            registrar_auditoria("crear_template_ehr", "ehr_templates", nombre_tpl, "Plantilla SOAP creada")
+                            st.success("Plantilla creada.")
+                        else:
+                            st.error("No se pudo crear la plantilla. Revisa que no exista otra con el mismo nombre.")
+                    else:
+                        st.error("El nombre es obligatorio.")
     else:
         st.warning("No hay animales registrados.")
 
@@ -2099,6 +2255,7 @@ elif menu == "Farmacia/Stock":
                 if st.form_submit_button("Agregar"):
                     run_query("INSERT INTO farmacia (nombre_producto, principio_activo, tipo_producto, proveedor, concentracion, presentacion, laboratorio) VALUES (?, ?, ?, ?, ?, ?, ?)",
                              (nom_prod, principio, tipo_prod, proveedor, concentracion, presentacion, laboratorio))
+                    registrar_auditoria("crear_producto", "farmacia", nom_prod, tipo_prod)
                     st.success("Producto agregado.")
 
         df_prod = fetch_data("SELECT * FROM farmacia ORDER BY nombre_producto")
@@ -2122,6 +2279,7 @@ elif menu == "Farmacia/Stock":
                     if st.form_submit_button("Agregar Stock"):
                         run_query("INSERT INTO stock (producto_id, lote, fecha_vencimiento, cantidad, precio_compra, precio_venta, ubicacion, stock_minimo, proveedor_predeterminado) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                                  (prod_id, lote, fecha_venc, cantidad, precio_c, precio_v, ubicacion, stock_minimo, proveedor_pred))
+                        registrar_auditoria("crear_stock", "stock", prod_id, f"Lote {lote} cantidad {cantidad}")
                         st.success("Stock agregado.")
 
             df_stock = fetch_data("""
@@ -2166,6 +2324,7 @@ elif menu == "Farmacia/Stock":
                 estado_oc = st.selectbox("Estado", ["Borrador", "Solicitada", "Recibida", "Cancelada"])
                 if st.form_submit_button("Actualizar orden"):
                     run_query("UPDATE ordenes_compra SET estado = ? WHERE id = ?", (estado_oc, oc_sel))
+                    registrar_auditoria("actualizar_orden_compra", "ordenes_compra", oc_sel, estado_oc)
                     st.success("Orden actualizada.")
 
 # ====================== RECETARIO ======================
