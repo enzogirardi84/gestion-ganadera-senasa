@@ -9,6 +9,8 @@ import tempfile
 import os
 import shutil
 import hashlib
+import hmac
+import secrets
 import io
 import csv
 
@@ -21,6 +23,8 @@ SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
 
 DB_NAME = 'gestion_bovinos_senasa.db'
 BACKUP_DIR = 'backups'
+ROLES_USUARIO = ["Administrador", "Veterinario", "Tecnico", "Propietario"]
+PBKDF2_ITERATIONS = 260000
 
 _supabase = None
 
@@ -454,11 +458,15 @@ def run_query(query, params=()):
     except Exception as e:
         return False
 
-# Crear usuario admin por defecto si no existe.
-try:
-    run_query("INSERT OR IGNORE INTO usuarios (username, password_hash, nombre, rol) VALUES ('admin', '240be518fabd2724ddb6f04eeb1da5967448d7e831c08c8fa822809f74c720a9', 'Administrador', 'Administrador')")
-except:
-    pass
+def run_insert_return_id(query, params=()):
+    try:
+        with sqlite3.connect(DB_NAME) as conn:
+            c = conn.cursor()
+            c.execute(query, params)
+            conn.commit()
+            return c.lastrowid
+    except Exception:
+        return None
 
 # Migraciones: agregar columnas faltantes a tablas existentes
 try:
@@ -528,13 +536,27 @@ def generar_pdf(df, titulo):
 def verificar_alertas():
     bovinos = fetch_data("SELECT caravana, fecha_nacimiento, estatus_brucelosis FROM bovinos WHERE estado = 'Activo'")
     today = date.today()
-    run_query("DELETE FROM alertas WHERE resuelta = 1")
+    run_query("DELETE FROM alertas WHERE tipo_alerta IN ('Brucelosis Pendiente', 'Vencimiento Stock')")
+
+    def crear_alerta_unica(tipo, caravana, descripcion):
+        run_query(
+            "INSERT INTO alertas (tipo_alerta, caravana, descripcion, fecha_alerta) VALUES (?, ?, ?, ?)",
+            (tipo, caravana, descripcion, today),
+        )
+
     for _, row in bovinos.iterrows():
-        fecha_nac = datetime.strptime(str(row['fecha_nacimiento']), '%Y-%m-%d').date()
-        edad_meses = relativedelta(today, fecha_nac).months
+        try:
+            fecha_nac = datetime.strptime(str(row['fecha_nacimiento']), '%Y-%m-%d').date()
+        except Exception:
+            continue
+        edad = relativedelta(today, fecha_nac)
+        edad_meses = edad.years * 12 + edad.months
         if 3 <= edad_meses <= 8 and row['estatus_brucelosis'] == 'Sin Diagnostico':
-            run_query("INSERT INTO alertas (tipo_alerta, caravana, descripcion, fecha_alerta) VALUES (?, ?, ?, ?)",
-                     ('Brucelosis Pendiente', row['caravana'], f'Verificar vacunacion Cepa 19 (edad: {edad_meses} meses)', today))
+            crear_alerta_unica(
+                "Brucelosis Pendiente",
+                row["caravana"],
+                f"Verificar vacunacion Cepa 19 (edad: {edad_meses} meses)",
+            )
 
     stock = fetch_data("""
         SELECT s.id, f.nombre_producto, s.lote, s.fecha_vencimiento, s.cantidad
@@ -542,13 +564,186 @@ def verificar_alertas():
         WHERE s.fecha_vencimiento BETWEEN DATE('now') AND DATE('now', '+90 days')
     """)
     for _, row in stock.iterrows():
-        dias = (datetime.strptime(row['fecha_vencimiento'], '%Y-%m-%d').date() - date.today()).days
-        run_query("INSERT INTO alertas (tipo_alerta, caravana, descripcion, fecha_alerta) VALUES (?, ?, ?, ?)",
-                 ('Vencimiento Stock', 'Sistema', f"{row['nombre_producto']} lote {row['lote']} vence en {dias} dias", today))
+        try:
+            dias = (datetime.strptime(row['fecha_vencimiento'], '%Y-%m-%d').date() - today).days
+        except Exception:
+            continue
+        crear_alerta_unica(
+            "Vencimiento Stock",
+            "Sistema",
+            f"{row['nombre_producto']} lote {row['lote']} vence en {dias} dias",
+        )
 
 # --- USUARIOS ---
 def hash_password(password):
-    return hashlib.sha256(password.encode()).hexdigest()
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        str(password).encode("utf-8"),
+        salt.encode("utf-8"),
+        PBKDF2_ITERATIONS,
+    ).hex()
+    return f"pbkdf2_sha256${PBKDF2_ITERATIONS}${salt}${digest}"
+
+def verificar_password(password, password_hash):
+    stored = str(password_hash or "")
+    if stored.startswith("pbkdf2_sha256$"):
+        try:
+            _, iterations, salt, digest = stored.split("$", 3)
+            calculated = hashlib.pbkdf2_hmac(
+                "sha256",
+                str(password).encode("utf-8"),
+                salt.encode("utf-8"),
+                int(iterations),
+            ).hex()
+            return hmac.compare_digest(calculated, digest)
+        except Exception:
+            return False
+
+    legacy_digest = hashlib.sha256(str(password).encode()).hexdigest()
+    return hmac.compare_digest(legacy_digest, stored)
+
+def requiere_rehash(password_hash):
+    return not str(password_hash or "").startswith("pbkdf2_sha256$")
+
+def normalizar_usuario(username):
+    return str(username or "").strip().lower()
+
+def hay_usuarios_registrados():
+    df = fetch_data("SELECT COUNT(*) as total FROM usuarios")
+    return bool(not df.empty and int(df["total"].iloc[0] or 0) > 0)
+
+def usuario_actual_es_admin():
+    usuario = st.session_state.get("usuario") or {}
+    return str(usuario.get("rol", "")).strip().lower() == "administrador"
+
+def crear_usuario_app(username, password, nombre, rol, activo=1):
+    username = normalizar_usuario(username)
+    nombre = str(nombre or "").strip()
+    rol = rol if rol in ROLES_USUARIO else "Veterinario"
+    if len(username) < 3:
+        return False, "El usuario debe tener al menos 3 caracteres."
+    if len(str(password or "")) < 8:
+        return False, "La clave debe tener al menos 8 caracteres."
+    if not nombre:
+        nombre = username
+    ok = run_query(
+        "INSERT INTO usuarios (username, password_hash, nombre, rol, activo) VALUES (?, ?, ?, ?, ?)",
+        (username, hash_password(password), nombre, rol, int(bool(activo))),
+    )
+    if not ok:
+        return False, "El usuario ya existe."
+    return True, "Usuario creado."
+
+def actualizar_usuario_app(user_id, nombre, rol, activo):
+    rol = rol if rol in ROLES_USUARIO else "Veterinario"
+    ok = run_query(
+        "UPDATE usuarios SET nombre = ?, rol = ?, activo = ? WHERE id = ?",
+        (str(nombre or "").strip(), rol, int(bool(activo)), int(user_id)),
+    )
+    return ok
+
+def cambiar_password_usuario_app(user_id, password):
+    if len(str(password or "")) < 8:
+        return False, "La clave debe tener al menos 8 caracteres."
+    ok = run_query("UPDATE usuarios SET password_hash = ? WHERE id = ?", (hash_password(password), int(user_id)))
+    return ok, "Clave actualizada." if ok else "No se pudo actualizar la clave."
+
+def render_setup_inicial():
+    st.title("Configuracion inicial")
+    st.info("No hay usuarios registrados. Crea el primer administrador desde esta pantalla.")
+    with st.form("setup_admin_inicial"):
+        username = st.text_input("Usuario administrador")
+        nombre = st.text_input("Nombre")
+        password = st.text_input("Clave", type="password")
+        password2 = st.text_input("Repetir clave", type="password")
+        if st.form_submit_button("Crear administrador"):
+            if password != password2:
+                st.error("Las claves no coinciden.")
+            else:
+                ok, msg = crear_usuario_app(username, password, nombre, "Administrador", activo=1)
+                if ok:
+                    st.success("Administrador creado. Ahora inicia sesion.")
+                    st.rerun()
+                else:
+                    st.error(msg)
+
+def render_login():
+    st.title("Inicio de Sesion")
+    with st.form("login"):
+        username = st.text_input("Usuario")
+        password = st.text_input("Clave", type="password")
+        if st.form_submit_button("Ingresar"):
+            username_norm = normalizar_usuario(username)
+            df = fetch_data("SELECT * FROM usuarios WHERE username = ? AND activo = 1", (username_norm,))
+            if not df.empty and verificar_password(password, df["password_hash"].iloc[0]):
+                if requiere_rehash(df["password_hash"].iloc[0]):
+                    run_query("UPDATE usuarios SET password_hash = ? WHERE id = ?", (hash_password(password), int(df["id"].iloc[0])))
+                    df = fetch_data("SELECT * FROM usuarios WHERE id = ?", (int(df["id"].iloc[0]),))
+                st.session_state.usuario = df.iloc[0].to_dict()
+                st.rerun()
+            else:
+                st.error("Usuario o clave incorrectos")
+
+def render_usuarios_admin():
+    st.title("Usuarios y Seguridad")
+    st.caption("Solo los administradores pueden crear usuarios, cambiar roles, activar accesos o resetear claves.")
+
+    with st.expander("Crear usuario", expanded=True):
+        with st.form("crear_usuario_admin", clear_on_submit=True):
+            c1, c2 = st.columns(2)
+            with c1:
+                username = st.text_input("Usuario")
+                nombre = st.text_input("Nombre completo")
+                rol = st.selectbox("Rol", ROLES_USUARIO, index=1)
+            with c2:
+                password = st.text_input("Clave inicial", type="password")
+                activo = st.checkbox("Activo", value=True)
+            if st.form_submit_button("Crear usuario"):
+                ok, msg = crear_usuario_app(username, password, nombre, rol, activo)
+                if ok:
+                    st.success(msg)
+                else:
+                    st.error(msg)
+
+    usuarios = fetch_data("SELECT id, username, nombre, rol, activo FROM usuarios ORDER BY username")
+    st.dataframe(usuarios, width=1200, hide_index=True)
+
+    if usuarios.empty:
+        return
+
+    st.markdown("### Editar usuario")
+    user_id = st.selectbox(
+        "Usuario",
+        usuarios["id"].tolist(),
+        format_func=lambda uid: usuarios.loc[usuarios["id"] == uid, "username"].iloc[0],
+    )
+    usuario_row = usuarios[usuarios["id"] == user_id].iloc[0]
+
+    with st.form("editar_usuario_admin"):
+        nombre_edit = st.text_input("Nombre", value=str(usuario_row["nombre"] or ""))
+        rol_edit = st.selectbox("Rol", ROLES_USUARIO, index=ROLES_USUARIO.index(usuario_row["rol"]) if usuario_row["rol"] in ROLES_USUARIO else 1)
+        activo_edit = st.checkbox("Activo", value=bool(usuario_row["activo"]))
+        if st.form_submit_button("Guardar cambios"):
+            if actualizar_usuario_app(user_id, nombre_edit, rol_edit, activo_edit):
+                if st.session_state.usuario.get("id") == user_id:
+                    st.session_state.usuario.update({"nombre": nombre_edit, "rol": rol_edit, "activo": int(bool(activo_edit))})
+                st.success("Usuario actualizado.")
+            else:
+                st.error("No se pudo actualizar el usuario.")
+
+    with st.form("reset_password_admin"):
+        nueva = st.text_input("Nueva clave", type="password")
+        nueva2 = st.text_input("Repetir nueva clave", type="password")
+        if st.form_submit_button("Resetear clave"):
+            if nueva != nueva2:
+                st.error("Las claves no coinciden.")
+            else:
+                ok, msg = cambiar_password_usuario_app(user_id, nueva)
+                if ok:
+                    st.success(msg)
+                else:
+                    st.error(msg)
 
 if 'usuario' not in st.session_state:
     st.session_state.usuario = None
@@ -581,34 +776,10 @@ except:
     pass
 
 if st.session_state.usuario is None:
-    st.title("Inicio de Sesion")
-    with st.form("login"):
-        username = st.text_input("Usuario")
-        password = st.text_input("Clave", type="password")
-        if st.form_submit_button("Ingresar"):
-            df = fetch_data("SELECT * FROM usuarios WHERE username = ? AND activo = 1", (username,))
-            if not df.empty and df['password_hash'].iloc[0] == hash_password(password):
-                st.session_state.usuario = df.iloc[0].to_dict()
-                st.rerun()
-            else:
-                st.error("Usuario o clave incorrectos")
-
-    st.markdown("---")
-    col_reg1, _ = st.columns(2)
-    with col_reg1:
-        with st.expander("Registrarse"):
-            with st.form("registro"):
-                new_user = st.text_input("Usuario nuevo")
-                new_pass = st.text_input("Clave", type="password")
-                new_nombre = st.text_input("Nombre completo")
-                new_rol = st.selectbox("Rol", ["Veterinario", "Administrador", "Tecnico", "Propietario"])
-                if st.form_submit_button("Crear cuenta"):
-                    if new_user and new_pass:
-                        q = "INSERT INTO usuarios (username, password_hash, nombre, rol) VALUES (?, ?, ?, ?)"
-                        if run_query(q, (new_user, hash_password(new_pass), new_nombre, new_rol)):
-                            st.success("Cuenta creada")
-                        else:
-                            st.error("El usuario ya existe")
+    if hay_usuarios_registrados():
+        render_login()
+    else:
+        render_setup_inicial()
     st.stop()
 
 st.sidebar.markdown(f"**Usuario:** {st.session_state.usuario['nombre']} ({st.session_state.usuario['rol']})")
@@ -618,7 +789,7 @@ if st.sidebar.button("Cerrar Sesion"):
 
 st.markdown("![Logo SENASA](https://upload.wikimedia.org/wikipedia/commons/thumb/c/cc/Logo_Senasa_%28Argentina%29.svg/512px-Logo_Senasa_%28Argentina%29.svg.png)")
 st.sidebar.title("Menu")
-menu = st.sidebar.radio("Navegacion", [
+opciones_menu = [
     "Dashboard Analitico", "Trazabilidad e Inventario", "Propietarios/Clientes",
     "Historia Clinica", "Sanidad y Brucelosis", "Hospitalizacion",
     "Agenda/Citas", "Laboratorio", "Farmacia/Stock",
@@ -628,10 +799,20 @@ menu = st.sidebar.radio("Navegacion", [
     "Lotes/Potreros", "Finanzas",
     "Alertas y Notificaciones", "Marco Legal y Normativas", "Exportar Reportes (PDF)",
     "BI - Analitica Avanzada"
-])
+]
+if usuario_actual_es_admin():
+    opciones_menu.append("Usuarios y Seguridad")
+menu = st.sidebar.radio("Navegacion", opciones_menu)
+
+# ====================== USUARIOS ======================
+if menu == "Usuarios y Seguridad":
+    if usuario_actual_es_admin():
+        render_usuarios_admin()
+    else:
+        st.error("No tenes permisos para administrar usuarios.")
 
 # ====================== DASHBOARD ======================
-if menu == "Dashboard Analitico":
+elif menu == "Dashboard Analitico":
     st.title("Panel de Control")
     crear_backup()
     df_bov = fetch_data("SELECT * FROM bovinos WHERE estado = 'Activo'")
@@ -1093,13 +1274,17 @@ elif menu == "Facturacion":
 
             if st.form_submit_button("Emitir Factura"):
                 if nro_fact and prop_sel:
-                    run_query("INSERT INTO facturacion (numero_factura, propietario_id, fecha_emision, tipo_comprobante, descripcion, subtotal, iva, total, metodo_pago) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                             (nro_fact, prop_sel, fecha_fac, tipo_comp, desc_fac, total_calc, iva, total_calc + iva, metodo))
-                    fact_id = fetch_data("SELECT last_insert_rowid() as id")['id'].iloc[0]
-                    for item in items:
-                        if item[0]:
-                            run_query("INSERT INTO factura_detalle (factura_id, concepto, cantidad, precio_unitario, subtotal) VALUES (?, ?, ?, ?, ?)", (fact_id, item[0], item[1], item[2], item[3]))
-                    st.success(f"Factura {nro_fact} emitida.")
+                    fact_id = run_insert_return_id(
+                        "INSERT INTO facturacion (numero_factura, propietario_id, fecha_emision, tipo_comprobante, descripcion, subtotal, iva, total, metodo_pago) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (nro_fact, prop_sel, fecha_fac, tipo_comp, desc_fac, total_calc, iva, total_calc + iva, metodo),
+                    )
+                    if fact_id:
+                        for item in items:
+                            if item[0]:
+                                run_query("INSERT INTO factura_detalle (factura_id, concepto, cantidad, precio_unitario, subtotal) VALUES (?, ?, ?, ?, ?)", (fact_id, item[0], item[1], item[2], item[3]))
+                        st.success(f"Factura {nro_fact} emitida.")
+                    else:
+                        st.error("No se pudo emitir la factura.")
                 else:
                     st.error("Numero factura y cliente obligatorios")
 
@@ -1317,13 +1502,17 @@ elif menu == "Recetario Digital":
                 meds_data.append((prod, dosis, frec, dur, via))
 
             if st.form_submit_button("Emitir Receta"):
-                run_query("INSERT INTO recetas (caravana, propietario_id, veterinario, fecha_receta, diagnostico, indicaciones, firma_digital) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                         (car_rec, None if prop_rec == "N/A" else prop_rec, st.session_state.usuario['nombre'], fecha_rec, diagnostico, indicaciones, "Firma digital pendiente"))
-                receta_id = fetch_data("SELECT last_insert_rowid() as id")['id'].iloc[0]
-                for md in meds_data:
-                    run_query("INSERT INTO receta_detalle (receta_id, producto_id, dosis, frecuencia, duracion, via_administracion) VALUES (?, ?, ?, ?, ?, ?)",
-                             (receta_id, md[0], md[1], md[2], md[3], md[4]))
-                st.success("Receta emitida.")
+                receta_id = run_insert_return_id(
+                    "INSERT INTO recetas (caravana, propietario_id, veterinario, fecha_receta, diagnostico, indicaciones, firma_digital) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (car_rec, None if prop_rec == "N/A" else prop_rec, st.session_state.usuario['nombre'], fecha_rec, diagnostico, indicaciones, "Firma digital pendiente"),
+                )
+                if receta_id:
+                    for md in meds_data:
+                        run_query("INSERT INTO receta_detalle (receta_id, producto_id, dosis, frecuencia, duracion, via_administracion) VALUES (?, ?, ?, ?, ?, ?)",
+                                 (receta_id, md[0], md[1], md[2], md[3], md[4]))
+                    st.success("Receta emitida.")
+                else:
+                    st.error("No se pudo emitir la receta.")
 
     st.markdown("### Recetas Emitidas")
     df_recetas = fetch_data("""
