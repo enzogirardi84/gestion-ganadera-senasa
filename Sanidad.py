@@ -774,40 +774,69 @@ def cambiar_password_usuario_app(user_id, password):
     return ok, "Clave actualizada." if ok else "No se pudo actualizar la clave."
 
 def render_setup_inicial():
+    st.markdown('<div class="gg-auth-kicker">Gestion Ganadera SENASA</div>', unsafe_allow_html=True)
     st.title("Configuracion inicial")
-    st.info("No hay usuarios registrados. Crea el primer administrador desde esta pantalla.")
-    with st.form("setup_admin_inicial"):
-        username = st.text_input("Usuario administrador")
-        nombre = st.text_input("Nombre")
-        password = st.text_input("Clave", type="password")
-        password2 = st.text_input("Repetir clave", type="password")
-        if st.form_submit_button("Crear administrador"):
-            if password != password2:
-                st.error("Las claves no coinciden.")
-            else:
-                ok, msg = guardar_admin_inicial(username, password, nombre)
-                if ok:
-                    st.success("Administrador creado. Ahora inicia sesion.")
-                    st.rerun()
+    st.caption("Crea el primer administrador. Despues, los usuarios se gestionan solo desde dentro del sistema.")
+    col_form, col_info = st.columns([0.58, 0.42], gap="large")
+    with col_form:
+        with st.form("setup_admin_inicial"):
+            username = st.text_input("Usuario administrador")
+            nombre = st.text_input("Nombre")
+            password = st.text_input("Clave", type="password")
+            password2 = st.text_input("Repetir clave", type="password")
+            if st.form_submit_button("Crear administrador"):
+                if password != password2:
+                    st.error("Las claves no coinciden.")
                 else:
-                    st.error(msg)
+                    ok, msg = guardar_admin_inicial(username, password, nombre)
+                    if ok:
+                        st.success("Administrador creado. Ahora inicia sesion.")
+                        st.rerun()
+                    else:
+                        st.error(msg)
+    with col_info:
+        st.markdown(
+            """
+            <div class="gg-auth-panel">
+                <div class="gg-auth-panel-title">Acceso protegido</div>
+                <p>El primer usuario queda como administrador y desde ahi se crean los demas accesos.</p>
+                <p>Usa una clave fuerte. El sistema guarda contrasenas con hash seguro PBKDF2.</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
 def render_login():
+    st.markdown('<div class="gg-auth-kicker">Gestion Ganadera SENASA</div>', unsafe_allow_html=True)
     st.title("Inicio de Sesion")
-    with st.form("login"):
-        username = st.text_input("Usuario")
-        password = st.text_input("Clave", type="password")
-        if st.form_submit_button("Ingresar"):
-            username_norm = normalizar_usuario(username)
-            df = fetch_data("SELECT * FROM usuarios WHERE username = ? AND activo = 1", (username_norm,))
-            if not df.empty and verificar_password(password, df["password_hash"].iloc[0]):
-                if requiere_rehash(df["password_hash"].iloc[0]):
-                    run_query("UPDATE usuarios SET password_hash = ? WHERE id = ?", (hash_password(password), int(df["id"].iloc[0])))
-                    df = fetch_data("SELECT * FROM usuarios WHERE id = ?", (int(df["id"].iloc[0]),))
-                st.session_state.usuario = df.iloc[0].to_dict()
-                st.rerun()
-            else:
-                st.error("Usuario o clave incorrectos")
+    st.caption("Acceso privado para gestion sanitaria, trazabilidad y administracion ganadera.")
+    col_form, col_info = st.columns([0.58, 0.42], gap="large")
+    with col_form:
+        with st.form("login"):
+            username = st.text_input("Usuario")
+            password = st.text_input("Clave", type="password")
+            if st.form_submit_button("Ingresar"):
+                username_norm = normalizar_usuario(username)
+                df = fetch_data("SELECT * FROM usuarios WHERE username = ? AND activo = 1", (username_norm,))
+                if not df.empty and verificar_password(password, df["password_hash"].iloc[0]):
+                    if requiere_rehash(df["password_hash"].iloc[0]):
+                        run_query("UPDATE usuarios SET password_hash = ? WHERE id = ?", (hash_password(password), int(df["id"].iloc[0])))
+                        df = fetch_data("SELECT * FROM usuarios WHERE id = ?", (int(df["id"].iloc[0]),))
+                    st.session_state.usuario = df.iloc[0].to_dict()
+                    st.rerun()
+                else:
+                    st.error("Usuario o clave incorrectos")
+    with col_info:
+        st.markdown(
+            """
+            <div class="gg-auth-panel">
+                <div class="gg-auth-panel-title">Sistema ganadero integral</div>
+                <p>Gestiona inventario, sanidad, reproduccion, farmacia, facturacion y reportes desde un unico panel.</p>
+                <p>Si necesitas acceso, solicitalo a un administrador del establecimiento.</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
 def render_usuarios_admin():
     st.title("Usuarios y Seguridad")
@@ -874,23 +903,23 @@ def aplicar_estilo_global():
         """
         <style>
         :root {
-            --gg-bg: #f7f8f5;
-            --gg-panel: #ffffff;
-            --gg-border: #d9ded4;
-            --gg-text: #1f2933;
-            --gg-muted: #647067;
-            --gg-green: #14532d;
-            --gg-teal: #115e59;
-            --gg-gold: #b7791f;
+            --gg-bg: #0b1120;
+            --gg-panel: #111827;
+            --gg-panel-2: #162033;
+            --gg-border: #253247;
+            --gg-text: #e5e7eb;
+            --gg-muted: #9ca3af;
+            --gg-green: #22c55e;
+            --gg-teal: #2dd4bf;
+            --gg-gold: #f59e0b;
+            --gg-danger: #f87171;
         }
         .stApp {
-            background:
-                linear-gradient(180deg, rgba(20,83,45,0.07), rgba(255,255,255,0) 280px),
-                var(--gg-bg);
+            background: var(--gg-bg);
             color: var(--gg-text);
         }
         section[data-testid="stSidebar"] {
-            background: #ffffff;
+            background: #080d19;
             border-right: 1px solid var(--gg-border);
         }
         section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p {
@@ -906,13 +935,16 @@ def aplicar_estilo_global():
             padding-bottom: 3rem;
             max-width: 1480px;
         }
+        [data-testid="stAppViewContainer"] > .main .block-container {
+            background: transparent;
+        }
         .gg-header {
             border: 1px solid var(--gg-border);
-            background: linear-gradient(135deg, #ffffff 0%, #eef7f0 100%);
+            background: #101827;
             border-radius: 8px;
             padding: 20px 24px;
             margin-bottom: 18px;
-            box-shadow: 0 12px 34px rgba(15, 23, 42, 0.06);
+            box-shadow: 0 18px 50px rgba(0, 0, 0, 0.22);
         }
         .gg-kicker {
             color: var(--gg-teal);
@@ -934,12 +966,42 @@ def aplicar_estilo_global():
             margin-top: 8px;
             max-width: 900px;
         }
+        .gg-auth-kicker {
+            color: var(--gg-teal);
+            font-size: .78rem;
+            font-weight: 800;
+            letter-spacing: .12em;
+            text-transform: uppercase;
+            margin-bottom: 6px;
+        }
+        .gg-auth-panel {
+            background: #111827;
+            border: 1px solid var(--gg-border);
+            border-radius: 8px;
+            padding: 22px;
+            min-height: 220px;
+            box-shadow: 0 18px 50px rgba(0, 0, 0, 0.22);
+        }
+        .gg-auth-panel-title {
+            color: var(--gg-green);
+            font-size: 1.15rem;
+            font-weight: 800;
+            margin-bottom: 10px;
+        }
+        .gg-auth-panel p {
+            color: var(--gg-muted);
+            margin-bottom: 10px;
+            line-height: 1.55;
+        }
+        .st-emotion-cache-1jicfl2, .st-emotion-cache-13ln4jf {
+            padding-top: 2rem;
+        }
         div[data-testid="stMetric"] {
             background: var(--gg-panel);
             border: 1px solid var(--gg-border);
             border-radius: 8px;
             padding: 14px 16px;
-            box-shadow: 0 8px 22px rgba(15, 23, 42, 0.045);
+            box-shadow: 0 12px 34px rgba(0, 0, 0, 0.18);
         }
         div[data-testid="stMetricLabel"] p {
             color: var(--gg-muted);
@@ -953,28 +1015,62 @@ def aplicar_estilo_global():
             border: 1px solid var(--gg-border);
             border-radius: 8px;
         }
+        div[data-testid="stForm"] {
+            background: var(--gg-panel);
+            border: 1px solid var(--gg-border);
+            border-radius: 8px;
+            padding: 22px;
+            box-shadow: 0 18px 50px rgba(0, 0, 0, 0.22);
+        }
         div[data-testid="stDataFrame"] {
             border: 1px solid var(--gg-border);
             border-radius: 8px;
             overflow: hidden;
         }
+        label, .stTextInput label, .stSelectbox label, .stNumberInput label,
+        .stDateInput label, .stTextArea label, .stRadio label, .stCheckbox label {
+            color: var(--gg-text) !important;
+            font-weight: 700;
+        }
+        input, textarea, [data-baseweb="input"] input {
+            color: #f9fafb !important;
+            background: #0f172a !important;
+        }
+        div[data-baseweb="input"], div[data-baseweb="textarea"], div[data-baseweb="select"] > div {
+            background: #0f172a !important;
+            border-color: #334155 !important;
+            color: #f9fafb !important;
+        }
+        div[data-baseweb="input"]:focus-within, div[data-baseweb="textarea"]:focus-within {
+            border-color: var(--gg-green) !important;
+            box-shadow: 0 0 0 1px rgba(34, 197, 94, .45) !important;
+        }
         .stButton > button, .stDownloadButton > button, button[kind="primaryFormSubmit"] {
             border-radius: 6px;
-            border: 1px solid #0f5132;
-            background: #14532d;
-            color: white;
+            border: 1px solid #22c55e;
+            background: #16a34a;
+            color: #06120b;
             font-weight: 700;
         }
         .stButton > button p, .stDownloadButton > button p, button[kind="primaryFormSubmit"] p {
-            color: white;
+            color: #06120b;
         }
         .stButton > button:hover, .stDownloadButton > button:hover, button[kind="primaryFormSubmit"]:hover {
-            border-color: #115e59;
-            background: #115e59;
-            color: white;
+            border-color: #86efac;
+            background: #22c55e;
+            color: #06120b;
         }
         h1, h2, h3 {
             color: var(--gg-green);
+        }
+        p, span, div {
+            color: inherit;
+        }
+        [data-testid="stAlert"] {
+            border-radius: 8px;
+        }
+        div[role="radiogroup"] label {
+            color: var(--gg-text) !important;
         }
         </style>
         """,
@@ -997,10 +1093,10 @@ def render_sidebar_usuario():
     usuario = st.session_state.usuario
     st.sidebar.markdown(
         f"""
-        <div style="padding:12px;border:1px solid #d9ded4;border-radius:8px;background:#f8faf6;margin-bottom:12px;">
-            <div style="font-size:.72rem;color:#647067;text-transform:uppercase;font-weight:700;">Sesion</div>
-            <div style="font-weight:800;color:#14532d;">{usuario['nombre']}</div>
-            <div style="font-size:.85rem;color:#647067;">{usuario['rol']}</div>
+        <div style="padding:12px;border:1px solid #253247;border-radius:8px;background:#111827;margin-bottom:12px;">
+            <div style="font-size:.72rem;color:#9ca3af;text-transform:uppercase;font-weight:700;">Sesion</div>
+            <div style="font-weight:800;color:#22c55e;">{usuario['nombre']}</div>
+            <div style="font-size:.85rem;color:#9ca3af;">{usuario['rol']}</div>
         </div>
         """,
         unsafe_allow_html=True,
