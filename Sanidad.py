@@ -16,23 +16,13 @@ import csv
 USAR_SUPABASE = False  # False = SQLite local/cloud | True = Supabase cloud
 
 SUPABASE_URL = "https://tfdgaxowacbxqtuvhhdp.supabase.co"
-SUPABASE_KEY = os.environ.get("SUPABASE_ANON_KEY", "sb_publishable_cFT_GCvgpBWWtR14HcNvaQ_Q0EH-Paf")
+SUPABASE_KEY = os.environ.get("SUPABASE_ANON_KEY", "")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
 
 DB_NAME = 'gestion_bovinos_senasa.db'
 BACKUP_DIR = 'backups'
 
-if USAR_SUPABASE:
-    try:
-        from supabase import create_client
-        _supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-        st.cache_data.clear()
-    except:
-        st.error("Error conectando a Supabase. Usando SQLite local.")
-        USAR_SUPABASE = False
-        _supabase = None
-else:
-    _supabase = None
+_supabase = None
 
 def init_db():
     with sqlite3.connect(DB_NAME) as conn:
@@ -563,6 +553,14 @@ if 'usuario' not in st.session_state:
 
 # --- UI ---
 st.set_page_config(page_title="Gestion Ganadera SENASA", page_icon="AR", layout="wide")
+
+# Inicializar Supabase si está configurado
+if USAR_SUPABASE:
+    try:
+        from supabase import create_client
+        _supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+    except:
+        pass
 
 # Migraciones
 try:
