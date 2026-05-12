@@ -325,6 +325,7 @@ def init_db():
                 password_hash TEXT,
                 nombre TEXT,
                 rol TEXT DEFAULT 'Veterinario',
+                propietario_id INTEGER,
                 activo INTEGER DEFAULT 1
             )
         ''')
@@ -930,9 +931,9 @@ def render_busqueda_global():
     with tabs[1]:
         df = fetch_data(
             """
-            SELECT id, nombre, apellido, dni_cuit, telefono, email, establecimiento, localidad
+            SELECT id, nombre, apellido, documento, cuit, telefono, email, localidad, provincia
             FROM propietarios
-            WHERE nombre LIKE ? OR apellido LIKE ? OR dni_cuit LIKE ? OR telefono LIKE ? OR email LIKE ? OR establecimiento LIKE ?
+            WHERE nombre LIKE ? OR apellido LIKE ? OR documento LIKE ? OR cuit LIKE ? OR telefono LIKE ? OR email LIKE ?
             ORDER BY apellido LIMIT 100
             """,
             (like, like, like, like, like, like),
@@ -963,15 +964,78 @@ def render_busqueda_global():
     with tabs[4]:
         df = fetch_data(
             """
-            SELECT fa.numero_factura, fa.fecha_factura, fa.tipo_comprobante, fa.total, fa.estado,
+            SELECT fa.numero_factura, fa.fecha_emision, fa.tipo_comprobante, fa.total, fa.estado_pago,
                    COALESCE(p.nombre || ' ' || p.apellido, 'Sin cliente') as cliente
             FROM facturacion fa LEFT JOIN propietarios p ON fa.propietario_id = p.id
             WHERE fa.numero_factura LIKE ? OR fa.descripcion LIKE ? OR p.nombre LIKE ? OR p.apellido LIKE ?
-            ORDER BY fa.fecha_factura DESC LIMIT 100
+            ORDER BY fa.fecha_emision DESC LIMIT 100
             """,
             (like, like, like, like),
         )
         st.dataframe(df, use_container_width=True, hide_index=True)
+
+def render_portal_cliente():
+    render_app_header("Portal del Cliente", "Consulta privada de animales, turnos, certificados, recordatorios y facturacion.")
+    propietario_id = propietario_id_usuario_actual()
+    if not propietario_id:
+        st.warning("Tu usuario aun no esta vinculado a un cliente. Pedi a un administrador que lo asocie desde Usuarios y Seguridad.")
+        return
+
+    propietario = fetch_data("SELECT * FROM propietarios WHERE id = ?", (propietario_id,))
+    if propietario.empty:
+        st.error("No encontramos el cliente vinculado a este usuario.")
+        return
+    p = propietario.iloc[0]
+    st.markdown(f"### {p['nombre']} {p['apellido']}")
+    st.caption(f"{p['email'] or 'Sin email'} | {p['telefono'] or 'Sin telefono'}")
+
+    tab_animales, tab_turnos, tab_cert, tab_rec, tab_fact = st.tabs(["Animales", "Turnos", "Certificados", "Recordatorios", "Facturas"])
+    with tab_animales:
+        animales = fetch_data(
+            """
+            SELECT caravana, tipo_identificacion, raza, sexo, categoria, fecha_nacimiento, estado, estatus_brucelosis
+            FROM bovinos WHERE propietario_id = ? ORDER BY caravana
+            """,
+            (propietario_id,),
+        )
+        st.dataframe(animales, use_container_width=True, hide_index=True)
+    with tab_turnos:
+        turnos = fetch_data(
+            """
+            SELECT fecha_evento, hora_evento, tipo_evento, titulo, caravana, veterinario, estado
+            FROM agenda WHERE propietario_id = ? ORDER BY fecha_evento DESC, hora_evento DESC
+            """,
+            (propietario_id,),
+        )
+        st.dataframe(turnos, use_container_width=True, hide_index=True)
+    with tab_cert:
+        certificados = fetch_data(
+            """
+            SELECT c.fecha_emision, c.fecha_validez, c.caravana, c.tipo_certificado, c.veterinario_firmante, c.resultado
+            FROM certificados c JOIN bovinos b ON c.caravana = b.caravana
+            WHERE b.propietario_id = ? ORDER BY c.fecha_emision DESC
+            """,
+            (propietario_id,),
+        )
+        st.dataframe(certificados, use_container_width=True, hide_index=True)
+    with tab_rec:
+        recordatorios = fetch_data(
+            """
+            SELECT fecha_programada, tipo_recordatorio, caravana, mensaje, canal, enviado
+            FROM recordatorios WHERE propietario_id = ? ORDER BY fecha_programada DESC
+            """,
+            (propietario_id,),
+        )
+        st.dataframe(recordatorios, use_container_width=True, hide_index=True)
+    with tab_fact:
+        facturas = fetch_data(
+            """
+            SELECT numero_factura, fecha_emision, tipo_comprobante, descripcion, total, estado_pago
+            FROM facturacion WHERE propietario_id = ? ORDER BY fecha_emision DESC
+            """,
+            (propietario_id,),
+        )
+        st.dataframe(facturas, use_container_width=True, hide_index=True)
 
 # --- USUARIOS ---
 def hash_password(password):
@@ -1024,10 +1088,52 @@ def usuario_actual_es_admin():
     usuario = st.session_state.get("usuario") or {}
     return str(usuario.get("rol", "")).strip().lower() == "administrador"
 
-def crear_usuario_app(username, password, nombre, rol, activo=1):
+MENUS_POR_ROL = {
+    "Administrador": "TODOS",
+    "Veterinario": [
+        "Dashboard Analitico", "Busqueda Global", "Trazabilidad e Inventario", "Propietarios/Clientes",
+        "Pizarra Clinica", "Historia Clinica", "Sanidad y Brucelosis", "Hospitalizacion",
+        "Agenda/Citas", "Laboratorio", "Farmacia/Stock", "Recetario Digital", "Facturacion",
+        "CRM y Seguimiento", "Recordatorios", "Produccion y Pesajes", "Reproduccion",
+        "Intervenciones", "Certificados", "Lotes/Potreros", "Alertas y Notificaciones",
+        "Exportar Reportes (PDF)", "BI - Analitica Avanzada",
+    ],
+    "Tecnico": [
+        "Dashboard Analitico", "Busqueda Global", "Trazabilidad e Inventario", "Pizarra Clinica",
+        "Sanidad y Brucelosis", "Hospitalizacion", "Agenda/Citas", "Laboratorio",
+        "Farmacia/Stock", "Recordatorios", "Produccion y Pesajes", "Reproduccion",
+        "Intervenciones", "Certificados", "Lotes/Potreros", "Alertas y Notificaciones",
+        "Exportar Reportes (PDF)",
+    ],
+    "Propietario": ["Portal del Cliente"],
+}
+
+def rol_actual():
+    usuario = st.session_state.get("usuario") or {}
+    return str(usuario.get("rol") or "Propietario")
+
+def menus_disponibles(opciones):
+    rol = rol_actual()
+    permitidos = MENUS_POR_ROL.get(rol, ["Portal del Cliente"])
+    if permitidos == "TODOS":
+        return opciones + ["Usuarios y Seguridad"]
+    return [m for m in opciones if m in permitidos]
+
+def propietario_id_usuario_actual():
+    usuario = st.session_state.get("usuario") or {}
+    propietario_id = usuario.get("propietario_id")
+    if propietario_id is None or pd.isna(propietario_id):
+        return None
+    try:
+        return int(propietario_id)
+    except Exception:
+        return None
+
+def crear_usuario_app(username, password, nombre, rol, activo=1, propietario_id=None):
     username = normalizar_usuario(username)
     nombre = str(nombre or "").strip()
     rol = rol if rol in ROLES_USUARIO else "Veterinario"
+    propietario_id = propietario_id if rol == "Propietario" else None
     if len(username) < 3:
         return False, "El usuario debe tener al menos 3 caracteres."
     if len(str(password or "")) < 8:
@@ -1035,8 +1141,8 @@ def crear_usuario_app(username, password, nombre, rol, activo=1):
     if not nombre:
         nombre = username
     ok = run_query(
-        "INSERT INTO usuarios (username, password_hash, nombre, rol, activo) VALUES (?, ?, ?, ?, ?)",
-        (username, hash_password(password), nombre, rol, int(bool(activo))),
+        "INSERT INTO usuarios (username, password_hash, nombre, rol, propietario_id, activo) VALUES (?, ?, ?, ?, ?, ?)",
+        (username, hash_password(password), nombre, rol, propietario_id, int(bool(activo))),
     )
     if not ok:
         return False, "El usuario ya existe."
@@ -1065,11 +1171,12 @@ def guardar_admin_inicial(username, password, nombre):
 
     return crear_usuario_app(username, password, nombre, "Administrador", activo=1)
 
-def actualizar_usuario_app(user_id, nombre, rol, activo):
+def actualizar_usuario_app(user_id, nombre, rol, activo, propietario_id=None):
     rol = rol if rol in ROLES_USUARIO else "Veterinario"
+    propietario_id = propietario_id if rol == "Propietario" else None
     ok = run_query(
-        "UPDATE usuarios SET nombre = ?, rol = ?, activo = ? WHERE id = ?",
-        (str(nombre or "").strip(), rol, int(bool(activo)), int(user_id)),
+        "UPDATE usuarios SET nombre = ?, rol = ?, propietario_id = ?, activo = ? WHERE id = ?",
+        (str(nombre or "").strip(), rol, propietario_id, int(bool(activo)), int(user_id)),
     )
     return ok
 
@@ -1147,6 +1254,13 @@ def render_login():
 def render_usuarios_admin():
     st.title("Usuarios y Seguridad")
     st.caption("Solo los administradores pueden crear usuarios, cambiar roles, activar accesos o resetear claves.")
+    propietarios = fetch_data("SELECT id, nombre, apellido, email FROM propietarios ORDER BY apellido, nombre")
+    propietario_opciones = [0] + (propietarios["id"].tolist() if not propietarios.empty else [])
+    def nombre_propietario(pid):
+        if pid == 0 or propietarios.empty:
+            return "Sin cliente vinculado"
+        fila = propietarios[propietarios["id"] == pid].iloc[0]
+        return f"{fila['nombre']} {fila['apellido']} - {fila['email'] or 'sin email'}"
 
     with st.expander("Crear usuario", expanded=True):
         with st.form("crear_usuario_admin", clear_on_submit=True):
@@ -1158,15 +1272,22 @@ def render_usuarios_admin():
             with c2:
                 password = st.text_input("Clave inicial", type="password")
                 activo = st.checkbox("Activo", value=True)
+                propietario_sel = st.selectbox("Cliente vinculado", propietario_opciones, format_func=nombre_propietario)
             if st.form_submit_button("Crear usuario"):
-                ok, msg = crear_usuario_app(username, password, nombre, rol, activo)
+                propietario_id = None if propietario_sel == 0 else propietario_sel
+                ok, msg = crear_usuario_app(username, password, nombre, rol, activo, propietario_id)
                 if ok:
                     registrar_auditoria("crear_usuario", "usuarios", username, f"Rol: {rol}")
                     st.success(msg)
                 else:
                     st.error(msg)
 
-    usuarios = fetch_data("SELECT id, username, nombre, rol, activo FROM usuarios ORDER BY username")
+    usuarios = fetch_data("""
+        SELECT u.id, u.username, u.nombre, u.rol, u.activo, u.propietario_id,
+               COALESCE(p.nombre || ' ' || p.apellido, '') as cliente_vinculado
+        FROM usuarios u LEFT JOIN propietarios p ON u.propietario_id = p.id
+        ORDER BY u.username
+    """)
     st.dataframe(usuarios, width=1200, hide_index=True)
 
     if usuarios.empty:
@@ -1183,11 +1304,15 @@ def render_usuarios_admin():
     with st.form("editar_usuario_admin"):
         nombre_edit = st.text_input("Nombre", value=str(usuario_row["nombre"] or ""))
         rol_edit = st.selectbox("Rol", ROLES_USUARIO, index=ROLES_USUARIO.index(usuario_row["rol"]) if usuario_row["rol"] in ROLES_USUARIO else 1)
+        prop_actual = int(usuario_row["propietario_id"]) if pd.notna(usuario_row["propietario_id"]) else 0
+        prop_index = propietario_opciones.index(prop_actual) if prop_actual in propietario_opciones else 0
+        propietario_edit = st.selectbox("Cliente vinculado", propietario_opciones, index=prop_index, format_func=nombre_propietario)
         activo_edit = st.checkbox("Activo", value=bool(usuario_row["activo"]))
         if st.form_submit_button("Guardar cambios"):
-            if actualizar_usuario_app(user_id, nombre_edit, rol_edit, activo_edit):
+            propietario_id = None if propietario_edit == 0 else propietario_edit
+            if actualizar_usuario_app(user_id, nombre_edit, rol_edit, activo_edit, propietario_id):
                 if st.session_state.usuario.get("id") == user_id:
-                    st.session_state.usuario.update({"nombre": nombre_edit, "rol": rol_edit, "activo": int(bool(activo_edit))})
+                    st.session_state.usuario.update({"nombre": nombre_edit, "rol": rol_edit, "propietario_id": propietario_id, "activo": int(bool(activo_edit))})
                 registrar_auditoria("actualizar_usuario", "usuarios", user_id, f"Rol: {rol_edit} Activo: {int(bool(activo_edit))}")
                 st.success("Usuario actualizado.")
             else:
@@ -1481,6 +1606,7 @@ for tabla, columna, definicion in [
     ("historia_clinica", "template_id", "INTEGER"),
     ("stock", "stock_minimo", "INTEGER DEFAULT 0"),
     ("stock", "proveedor_predeterminado", "TEXT"),
+    ("usuarios", "propietario_id", "INTEGER"),
 ]:
     agregar_columna_si_falta(tabla, columna, definicion)
 sembrar_templates_ehr()
@@ -1506,7 +1632,7 @@ if st.sidebar.button("Cerrar Sesion"):
 
 st.sidebar.markdown("### Menu")
 opciones_menu = [
-    "Dashboard Analitico", "Busqueda Global", "Trazabilidad e Inventario", "Propietarios/Clientes",
+    "Dashboard Analitico", "Portal del Cliente", "Busqueda Global", "Trazabilidad e Inventario", "Propietarios/Clientes",
     "Pizarra Clinica", "Historia Clinica", "Sanidad y Brucelosis", "Hospitalizacion",
     "Agenda/Citas", "Laboratorio", "Farmacia/Stock",
     "Recetario Digital", "Facturacion", "CRM y Seguimiento",
@@ -1516,8 +1642,10 @@ opciones_menu = [
     "Alertas y Notificaciones", "Marco Legal y Normativas", "Exportar Reportes (PDF)",
     "BI - Analitica Avanzada"
 ]
-if usuario_actual_es_admin():
-    opciones_menu.append("Usuarios y Seguridad")
+opciones_menu = menus_disponibles(opciones_menu)
+if not opciones_menu:
+    st.error("Tu rol no tiene modulos habilitados. Contacta a un administrador.")
+    st.stop()
 menu = st.sidebar.radio("Navegacion", opciones_menu)
 render_app_header(menu)
 
@@ -1527,6 +1655,10 @@ if menu == "Usuarios y Seguridad":
         render_usuarios_admin()
     else:
         st.error("No tenes permisos para administrar usuarios.")
+
+# ====================== PORTAL CLIENTE ======================
+elif menu == "Portal del Cliente":
+    render_portal_cliente()
 
 # ====================== DASHBOARD ======================
 elif menu == "Dashboard Analitico":
@@ -1648,6 +1780,45 @@ elif menu == "Trazabilidad e Inventario":
         WHERE b.estado='Activo'
     """)
     st.dataframe(df_inv, width=1200, hide_index=True)
+
+# ====================== PROPIETARIOS ======================
+elif menu == "Propietarios/Clientes":
+    render_app_header("Propietarios y Clientes", "Alta y consulta de clientes vinculados a animales, turnos y facturacion.")
+    with st.expander("Nuevo cliente", expanded=True):
+        with st.form("form_propietario", clear_on_submit=True):
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                nombre = st.text_input("Nombre")
+                apellido = st.text_input("Apellido")
+                documento = st.text_input("Documento")
+            with c2:
+                cuit = st.text_input("CUIT")
+                telefono = st.text_input("Telefono")
+                email = st.text_input("Email")
+            with c3:
+                direccion = st.text_input("Direccion")
+                localidad = st.text_input("Localidad")
+                provincia = st.text_input("Provincia")
+            if st.form_submit_button("Guardar cliente"):
+                if nombre.strip() or apellido.strip():
+                    ok = run_query(
+                        """
+                        INSERT INTO propietarios
+                        (nombre, apellido, documento, telefono, email, direccion, localidad, provincia, cuit)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (nombre, apellido, documento, telefono, email, direccion, localidad, provincia, cuit),
+                    )
+                    if ok:
+                        registrar_auditoria("crear_propietario", "propietarios", f"{nombre} {apellido}", email)
+                        st.success("Cliente guardado.")
+                    else:
+                        st.error("No se pudo guardar el cliente.")
+                else:
+                    st.error("Nombre o apellido es obligatorio.")
+
+    clientes = fetch_data("SELECT id, nombre, apellido, documento, cuit, telefono, email, localidad, provincia, fecha_registro FROM propietarios ORDER BY apellido, nombre")
+    st.dataframe(clientes, use_container_width=True, hide_index=True)
 
 # ====================== PIZARRA CLINICA ======================
 elif menu == "Pizarra Clinica":
