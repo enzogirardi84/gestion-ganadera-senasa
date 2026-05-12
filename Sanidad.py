@@ -1038,7 +1038,8 @@ def render_portal_cliente():
     render_app_header("Portal del Cliente", "Consulta privada de animales, turnos, certificados, recordatorios y facturacion.")
     propietario_id = propietario_id_usuario_actual()
     if not propietario_id:
-        st.warning("Tu usuario aun no esta vinculado a un cliente. Pedi a un administrador que lo asocie desde Usuarios y Seguridad.")
+        st.warning("Tu usuario aun no esta vinculado a un cliente.")
+        st.info("Pedi a un administrador que lo asocie desde Usuarios y Seguridad, campo Cliente vinculado.")
         return
 
     propietario = fetch_data("SELECT * FROM propietarios WHERE id = ?", (propietario_id,))
@@ -1047,55 +1048,87 @@ def render_portal_cliente():
         return
     p = propietario.iloc[0]
     st.markdown(f"### {p['nombre']} {p['apellido']}")
-    st.caption(f"{p['email'] or 'Sin email'} | {p['telefono'] or 'Sin telefono'}")
+    st.caption(f"{p['email'] or 'Sin email'} | {p['telefono'] or 'Sin telefono'} | {p['localidad'] or 'Sin localidad'}")
+
+    animales = fetch_data(
+        """
+        SELECT caravana, tipo_identificacion, raza, sexo, categoria, fecha_nacimiento, estado, estatus_brucelosis
+        FROM bovinos WHERE propietario_id = ? ORDER BY caravana
+        """,
+        (propietario_id,),
+    )
+    turnos = fetch_data(
+        """
+        SELECT fecha_evento, hora_evento, tipo_evento, titulo, caravana, veterinario, estado
+        FROM agenda WHERE propietario_id = ? ORDER BY fecha_evento DESC, hora_evento DESC
+        """,
+        (propietario_id,),
+    )
+    certificados = fetch_data(
+        """
+        SELECT c.fecha_emision, c.fecha_validez, c.caravana, c.tipo_certificado, c.veterinario_firmante, c.resultado
+        FROM certificados c JOIN bovinos b ON c.caravana = b.caravana
+        WHERE b.propietario_id = ? ORDER BY c.fecha_emision DESC
+        """,
+        (propietario_id,),
+    )
+    recordatorios = fetch_data(
+        """
+        SELECT fecha_programada, tipo_recordatorio, caravana, mensaje, canal, enviado
+        FROM recordatorios WHERE propietario_id = ? ORDER BY fecha_programada DESC
+        """,
+        (propietario_id,),
+    )
+    facturas = fetch_data(
+        """
+        SELECT numero_factura, fecha_emision, tipo_comprobante, descripcion, total, estado_pago
+        FROM facturacion WHERE propietario_id = ? ORDER BY fecha_emision DESC
+        """,
+        (propietario_id,),
+    )
+
+    prox_turnos = turnos[(turnos["estado"] == "Pendiente") & (pd.to_datetime(turnos["fecha_evento"], errors="coerce").dt.date >= date.today())] if not turnos.empty else pd.DataFrame()
+    rec_pendientes = recordatorios[(recordatorios["enviado"] == 0)] if not recordatorios.empty else pd.DataFrame()
+    deuda = float(facturas[facturas["estado_pago"] == "Pendiente"]["total"].sum()) if not facturas.empty else 0
 
     tab_animales, tab_turnos, tab_cert, tab_rec, tab_fact = st.tabs(["Animales", "Turnos", "Certificados", "Recordatorios", "Facturas"])
+    r1, r2, r3, r4 = st.columns(4)
+    r1.metric("Animales", len(animales))
+    r2.metric("Turnos pendientes", len(prox_turnos))
+    r3.metric("Recordatorios", len(rec_pendientes))
+    r4.metric("Saldo pendiente", f"${deuda:,.2f}", delta_color="inverse")
+
     with tab_animales:
-        animales = fetch_data(
-            """
-            SELECT caravana, tipo_identificacion, raza, sexo, categoria, fecha_nacimiento, estado, estatus_brucelosis
-            FROM bovinos WHERE propietario_id = ? ORDER BY caravana
-            """,
-            (propietario_id,),
-        )
-        st.dataframe(animales, use_container_width=True, hide_index=True)
+        if animales.empty:
+            st.info("No hay animales vinculados a tu cliente.")
+        else:
+            st.dataframe(animales, use_container_width=True, hide_index=True)
     with tab_turnos:
-        turnos = fetch_data(
-            """
-            SELECT fecha_evento, hora_evento, tipo_evento, titulo, caravana, veterinario, estado
-            FROM agenda WHERE propietario_id = ? ORDER BY fecha_evento DESC, hora_evento DESC
-            """,
-            (propietario_id,),
-        )
-        st.dataframe(turnos, use_container_width=True, hide_index=True)
+        if turnos.empty:
+            st.info("No tenes turnos registrados.")
+        else:
+            if not prox_turnos.empty:
+                st.markdown("### Proximos turnos")
+                st.dataframe(prox_turnos, use_container_width=True, hide_index=True)
+            st.markdown("### Historial")
+            st.dataframe(turnos, use_container_width=True, hide_index=True)
     with tab_cert:
-        certificados = fetch_data(
-            """
-            SELECT c.fecha_emision, c.fecha_validez, c.caravana, c.tipo_certificado, c.veterinario_firmante, c.resultado
-            FROM certificados c JOIN bovinos b ON c.caravana = b.caravana
-            WHERE b.propietario_id = ? ORDER BY c.fecha_emision DESC
-            """,
-            (propietario_id,),
-        )
-        st.dataframe(certificados, use_container_width=True, hide_index=True)
+        if certificados.empty:
+            st.info("No hay certificados emitidos para tus animales.")
+        else:
+            st.dataframe(certificados, use_container_width=True, hide_index=True)
     with tab_rec:
-        recordatorios = fetch_data(
-            """
-            SELECT fecha_programada, tipo_recordatorio, caravana, mensaje, canal, enviado
-            FROM recordatorios WHERE propietario_id = ? ORDER BY fecha_programada DESC
-            """,
-            (propietario_id,),
-        )
-        st.dataframe(recordatorios, use_container_width=True, hide_index=True)
+        if recordatorios.empty:
+            st.info("No tenes recordatorios programados.")
+        else:
+            st.dataframe(recordatorios, use_container_width=True, hide_index=True)
     with tab_fact:
-        facturas = fetch_data(
-            """
-            SELECT numero_factura, fecha_emision, tipo_comprobante, descripcion, total, estado_pago
-            FROM facturacion WHERE propietario_id = ? ORDER BY fecha_emision DESC
-            """,
-            (propietario_id,),
-        )
-        st.dataframe(facturas, use_container_width=True, hide_index=True)
+        if facturas.empty:
+            st.info("No hay comprobantes registrados.")
+        else:
+            if deuda > 0:
+                st.warning(f"Saldo pendiente: ${deuda:,.2f}")
+            st.dataframe(facturas, use_container_width=True, hide_index=True)
 
 # --- USUARIOS ---
 def hash_password(password):
