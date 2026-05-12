@@ -1733,63 +1733,105 @@ elif menu == "Dashboard Analitico":
     render_app_header("Dashboard Analitico", "Indicadores clave y estado general del establecimiento")
     crear_backup()
     df_bov = fetch_data("SELECT * FROM bovinos WHERE estado = 'Activo'")
-    if not df_bov.empty:
-        with st.container():
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Total Cabezas", len(df_bov))
-            c2.metric("Hembras", len(df_bov[df_bov['sexo'] == 'Hembra']))
-            c3.metric("Machos", len(df_bov[df_bov['sexo'] == 'Macho']))
-            rfid_count = len(df_bov[df_bov['tipo_identificacion'] == 'RFID (Electronica)'])
-            c4.metric("RFID", f"{rfid_count} / {len(df_bov)}", delta_color="off")
-        with st.container():
+    df_props_total = fetch_data("SELECT COUNT(*) as t FROM propietarios")
+    df_stock_bajo = fetch_data("""
+        SELECT COUNT(*) as t FROM (
+            SELECT s.producto_id, SUM(s.cantidad) as cantidad_total, MAX(s.stock_minimo) as stock_minimo
+            FROM stock s GROUP BY s.producto_id HAVING stock_minimo > 0 AND cantidad_total <= stock_minimo
+        )
+    """)
+    df_fact_pend = fetch_data("SELECT COALESCE(SUM(total), 0) as total FROM facturacion WHERE estado_pago = 'Pendiente'")
+    df_alertas = fetch_data("SELECT COUNT(*) as t FROM alertas WHERE resuelta = 0")
+
+    total_animales = len(df_bov)
+    total_clientes = int(df_props_total["t"].iloc[0] or 0) if not df_props_total.empty else 0
+    alertas_activas = int(df_alertas["t"].iloc[0] or 0) if not df_alertas.empty else 0
+    stock_bajo = int(df_stock_bajo["t"].iloc[0] or 0) if not df_stock_bajo.empty else 0
+    pendiente_cobro = float(df_fact_pend["total"].iloc[0] or 0) if not df_fact_pend.empty else 0
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Animales activos", total_animales)
+    c2.metric("Clientes", total_clientes)
+    c3.metric("Alertas", alertas_activas, delta_color="inverse")
+    c4.metric("Pendiente cobro", f"${pendiente_cobro:,.2f}", delta_color="inverse")
+
+    tab_resumen, tab_operativo, tab_inicio = st.tabs(["Resumen", "Operativo", "Primeros pasos"])
+
+    with tab_resumen:
+        if df_bov.empty:
+            st.info("Todavia no hay animales activos cargados. Usa la pestaña Primeros pasos para comenzar.")
+        else:
             c5, c6, c7, c8 = st.columns(4)
-            c5.metric("Brucelosis +", len(df_bov[df_bov['estatus_brucelosis'] == 'Positivo']), delta_color="inverse")
-            df_pes = fetch_data("SELECT AVG(peso_kg) as p FROM pesajes")
-            prom = df_pes['p'].iloc[0] if not df_pes.empty and pd.notna(df_pes['p'].iloc[0]) else 0
-            c6.metric("Peso Promedio", f"{prom:.1f} kg")
-            df_repr = fetch_data("SELECT COUNT(*) as t FROM reproduccion WHERE fecha_parto IS NOT NULL")
-            c7.metric("Partos", df_repr['t'].iloc[0])
-            df_al = fetch_data("SELECT COUNT(*) as t FROM alertas WHERE resuelta = 0")
-            c8.metric("Alertas", df_al['t'].iloc[0], delta_color="inverse")
-        st.markdown("---")
-        col_graf1, col_graf2 = st.columns(2)
-        with col_graf1:
-            st.markdown("### Categorias")
-            st.bar_chart(df_bov['categoria'].value_counts(), color="#2e9140")
-        with col_graf2:
-            st.markdown("### Brucelosis")
-            st.bar_chart(df_bov['estatus_brucelosis'].value_counts(), color="#d62728")
-        col_graf3, col_graf4 = st.columns(2)
-        with col_graf3:
-            st.markdown("### Razas")
-            st.bar_chart(df_bov['raza'].value_counts(), color="#1f77b4")
-        with col_graf4:
-            st.markdown("### Identificacion")
-            st.bar_chart(df_bov['tipo_identificacion'].value_counts(), color="#ff7f0e")
-        st.markdown("---")
-        st.markdown("### Indicadores")
-        col_e1, col_e2, col_e3 = st.columns(3)
-        with col_e1:
-            nac = len(df_bov[df_bov['categoria'].str.contains('Ternero', case=False)])
-            st.metric("Tasa Natalidad", f"{(nac/len(df_bov))*100:.1f}%" if len(df_bov)>0 else "0%")
-        with col_e2:
-            df_e = fetch_data("SELECT COUNT(*) as t FROM sanidad WHERE categoria_evento LIKE '%Clinico%'")
-            st.metric("Tratamientos", df_e['t'].iloc[0] if not df_e.empty else 0)
-        with col_e3:
-            df_v = fetch_data("SELECT COUNT(DISTINCT caravana) as t FROM sanidad WHERE categoria_evento LIKE '%Aftosa%'")
-            st.metric("Vacunados Aftosa", df_v['t'].iloc[0] if not df_v.empty else 0)
-        with st.expander("Alertas de Stock - Proximos a vencer"):
+            c5.metric("Hembras", len(df_bov[df_bov["sexo"] == "Hembra"]))
+            c6.metric("Machos", len(df_bov[df_bov["sexo"] == "Macho"]))
+            rfid_count = len(df_bov[df_bov["tipo_identificacion"] == "RFID (Electronica)"])
+            c7.metric("RFID", f"{rfid_count} / {total_animales}", delta_color="off")
+            positivos = len(df_bov[df_bov["estatus_brucelosis"] == "Positivo"])
+            c8.metric("Brucelosis +", positivos, delta_color="inverse")
+
+            col_graf1, col_graf2 = st.columns(2)
+            with col_graf1:
+                st.markdown("### Categorias")
+                st.bar_chart(df_bov["categoria"].fillna("Sin categoria").value_counts(), color="#2e9140")
+            with col_graf2:
+                st.markdown("### Brucelosis")
+                st.bar_chart(df_bov["estatus_brucelosis"].fillna("Sin diagnostico").value_counts(), color="#d62728")
+            col_graf3, col_graf4 = st.columns(2)
+            with col_graf3:
+                st.markdown("### Razas")
+                st.bar_chart(df_bov["raza"].fillna("Sin raza").value_counts(), color="#1f77b4")
+            with col_graf4:
+                st.markdown("### Identificacion")
+                st.bar_chart(df_bov["tipo_identificacion"].fillna("Sin dato").value_counts(), color="#ff7f0e")
+
+    with tab_operativo:
+        op1, op2, op3 = st.columns(3)
+        df_pes = fetch_data("SELECT AVG(peso_kg) as p FROM pesajes")
+        prom = df_pes["p"].iloc[0] if not df_pes.empty and pd.notna(df_pes["p"].iloc[0]) else 0
+        op1.metric("Peso promedio", f"{prom:.1f} kg")
+        df_repr = fetch_data("SELECT COUNT(*) as t FROM reproduccion WHERE fecha_parto IS NOT NULL")
+        op2.metric("Partos registrados", int(df_repr["t"].iloc[0] or 0) if not df_repr.empty else 0)
+        op3.metric("Stock bajo", stock_bajo, delta_color="inverse")
+
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.markdown("### Proximas citas")
+            df_citas = fetch_data("""
+                SELECT fecha_evento, hora_evento, tipo_evento, titulo, veterinario
+                FROM agenda
+                WHERE estado = 'Pendiente' AND fecha_evento >= DATE('now')
+                ORDER BY fecha_evento, hora_evento LIMIT 8
+            """)
+            if df_citas.empty:
+                st.success("No hay citas pendientes proximas.")
+            else:
+                st.dataframe(df_citas, use_container_width=True, hide_index=True)
+        with col_b:
+            st.markdown("### Stock proximo a vencer")
             df_venc = fetch_data("""
                 SELECT f.nombre_producto, s.lote, s.fecha_vencimiento, s.cantidad
                 FROM stock s JOIN farmacia f ON s.producto_id = f.id
                 WHERE s.fecha_vencimiento BETWEEN DATE('now') AND DATE('now', '+90 days')
+                ORDER BY s.fecha_vencimiento LIMIT 8
             """)
-            if not df_venc.empty:
-                st.dataframe(df_venc, width=1200, hide_index=True)
+            if df_venc.empty:
+                st.success("No hay productos proximos a vencer.")
             else:
-                st.success("No hay productos proximos a vencer")
-    else:
-        st.info("Sistema sin registros")
+                st.dataframe(df_venc, use_container_width=True, hide_index=True)
+
+    with tab_inicio:
+        st.markdown("### Flujo recomendado")
+        pasos = [
+            ("1", "Cargar clientes", "Propietarios/Clientes"),
+            ("2", "Registrar animales", "Trazabilidad e Inventario"),
+            ("3", "Cargar productos", "Farmacia/Stock"),
+            ("4", "Programar citas y recordatorios", "Agenda/Citas"),
+            ("5", "Emitir certificados o reportes", "Certificados"),
+        ]
+        for nro, texto, modulo in pasos:
+            st.write(f"**{nro}. {texto}** - modulo: `{modulo}`")
+        if df_bov.empty and total_clientes == 0:
+            st.warning("La base esta vacia: conviene empezar por clientes y despues animales.")
 
 # ====================== BUSQUEDA GLOBAL ======================
 elif menu == "Busqueda Global":
