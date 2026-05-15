@@ -547,6 +547,53 @@ except:
 
 init_db()
 
+# Tablas nuevas para funcionalidades extendidas
+try:
+    with sqlite3.connect(DB_NAME) as conn:
+        c = conn.cursor()
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS nutricion (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                caravana TEXT,
+                tipo_alimento TEXT,
+                cantidad_kg REAL,
+                frecuencia TEXT,
+                fecha_inicio DATE,
+                fecha_fin DATE,
+                objetivo TEXT,
+                observaciones TEXT,
+                FOREIGN KEY(caravana) REFERENCES bovinos(caravana)
+            )
+        ''')
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS produccion_leche (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                caravana TEXT,
+                fecha DATE,
+                litros_manana REAL DEFAULT 0,
+                litros_tarde REAL DEFAULT 0,
+                litros_total REAL DEFAULT 0,
+                observaciones TEXT,
+                FOREIGN KEY(caravana) REFERENCES bovinos(caravana)
+            )
+        ''')
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS calendario_sanitario (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                caravana TEXT,
+                tipo_evento TEXT,
+                producto TEXT,
+                fecha_programada DATE,
+                fecha_realizada DATE,
+                intervalo_dias INTEGER DEFAULT 0,
+                estado TEXT DEFAULT 'Pendiente',
+                FOREIGN KEY(caravana) REFERENCES bovinos(caravana)
+            )
+        ''')
+        conn.commit()
+except:
+    pass
+
 def run_query(query, params=()):
     try:
         if USAR_SUPABASE and _supabase:
@@ -1769,7 +1816,8 @@ opciones_menu = [
     "Pizarra Clinica", "Historia Clinica", "Sanidad y Brucelosis", "Hospitalizacion",
     "Agenda/Citas", "Laboratorio", "Farmacia/Stock",
     "Recetario Digital", "Facturacion", "CRM y Seguimiento",
-    "Recordatorios", "Produccion y Pesajes",
+    "Recordatorios", "Calendario Sanitario", "Nutricion",
+    "Produccion Lechera", "Produccion y Pesajes",
     "Reproduccion", "Intervenciones", "Certificados",
     "Lotes/Potreros", "Finanzas",
     "Alertas y Notificaciones", "Marco Legal y Normativas", "Exportar Reportes (PDF)",
@@ -2849,6 +2897,121 @@ elif menu == "Recetario Digital":
                 WHERE rd.receta_id = ?
             """, (sel_rec,))
             st.dataframe(df_det, width=1200, hide_index=True)
+
+# ====================== CALENDARIO SANITARIO ======================
+elif menu == "Calendario Sanitario":
+    render_app_header("Calendario Sanitario", "Planificacion automatica de vacunacion y desparasitacion")
+    caravanas = obtener_lista_caravanas()
+    if caravanas:
+        tab_cs1, tab_cs2 = st.tabs(["Programar Evento", "Calendario"])
+        with tab_cs1:
+            with st.form("form_calendario", clear_on_submit=True):
+                c1, c2 = st.columns(2)
+                with c1:
+                    car_cs = st.selectbox("Animal", caravanas)
+                    tipo_cs = st.selectbox("Tipo", ["Aftosa", "Brucelosis Cepa 19", "Carbunclo", "Desparasitacion", "Vitaminacion", "Revision Clinica"])
+                    producto_cs = st.text_input("Producto/Vacuna")
+                with c2:
+                    fecha_prog = st.date_input("Fecha programada", date.today())
+                    intervalo = st.number_input("Intervalo (dias)", 0, 365, 180)
+                if st.form_submit_button("Programar"):
+                    run_query("INSERT INTO calendario_sanitario (caravana, tipo_evento, producto, fecha_programada, intervalo_dias) VALUES (?, ?, ?, ?, ?)",
+                             (car_cs, tipo_cs, producto_cs, fecha_prog, intervalo))
+                    st.success("Evento programado.")
+        with tab_cs2:
+            df_cs = fetch_data("""
+                SELECT cs.*, 
+                       CASE WHEN cs.fecha_realizada IS NOT NULL THEN 'Realizado'
+                            WHEN date(cs.fecha_programada) < date('now') THEN 'Vencido'
+                            WHEN date(cs.fecha_programada) BETWEEN date('now') AND date('now', '+7 days') THEN 'Proximo'
+                            ELSE 'Programado' END as estado_color
+                FROM calendario_sanitario cs ORDER BY cs.fecha_programada
+            """)
+            st.dataframe(df_cs, width=1200, hide_index=True)
+            with st.form("form_realizar"):
+                ids_cs = df_cs[df_cs['fecha_realizada'].isna()]['id'].tolist() if not df_cs.empty else []
+                if ids_cs:
+                    sel_cs = st.selectbox("Evento realizado", ids_cs)
+                    if st.form_submit_button("Marcar Realizado"):
+                        run_query("UPDATE calendario_sanitario SET fecha_realizada = DATE('now'), estado = 'Realizado' WHERE id = ?", (sel_cs,))
+                        st.success("Evento marcado como realizado.")
+    else:
+        st.warning("No hay animales registrados.")
+
+# ====================== NUTRICION ======================
+elif menu == "Nutricion":
+    render_app_header("Nutricion y Alimentacion", "Control de dietas y raciones")
+    caravanas = obtener_lista_caravanas()
+    if caravanas:
+        tab_n1, tab_n2 = st.tabs(["Registrar Dieta", "Historial"])
+        with tab_n1:
+            with st.form("form_nutricion", clear_on_submit=True):
+                c1, c2 = st.columns(2)
+                with c1:
+                    car_n = st.selectbox("Animal", caravanas)
+                    tipo_alimento = st.selectbox("Tipo", ["Balanceado", "Pastura", "Silaje", "Heno", "Concentrado", "Suplemento", "Sales minerales", "Otro"])
+                    cantidad = st.number_input("Cantidad (kg)", 0.0, 500.0, 10.0)
+                with c2:
+                    frecuencia = st.selectbox("Frecuencia", ["Diaria", "Cada 2 dias", "Semanal", "Quincenal"])
+                    fecha_ini = st.date_input("Fecha inicio", date.today())
+                    fecha_fin = st.date_input("Fecha fin", date.today() + relativedelta(days=30))
+                    objetivo = st.text_input("Objetivo")
+                obs_n = st.text_area("Observaciones")
+                if st.form_submit_button("Registrar"):
+                    run_query("INSERT INTO nutricion (caravana, tipo_alimento, cantidad_kg, frecuencia, fecha_inicio, fecha_fin, objetivo, observaciones) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                             (car_n, tipo_alimento, cantidad, frecuencia, fecha_ini, fecha_fin, objetivo, obs_n))
+                    st.success("Dieta registrada.")
+        with tab_n2:
+            df_nut = fetch_data("SELECT * FROM nutricion ORDER BY fecha_inicio DESC")
+            st.dataframe(df_nut, width=1200, hide_index=True)
+    else:
+        st.warning("No hay animales registrados.")
+
+# ====================== PRODUCCION LECHE ======================
+elif menu == "Produccion Lechera":
+    render_app_header("Produccion Lechera", "Registro diario de ordeñe")
+    hembras = obtener_lista_caravanas(solo_hembras=True)
+    if hembras:
+        tab_l1, tab_l2, tab_l3 = st.tabs(["Registrar Ordeñe", "Produccion Diaria", "Estadisticas"])
+        with tab_l1:
+            with st.form("form_leche", clear_on_submit=True):
+                c1, c2 = st.columns(2)
+                with c1:
+                    car_l = st.selectbox("Vaca", hembras)
+                    fecha_l = st.date_input("Fecha", date.today())
+                with c2:
+                    litros_manana = st.number_input("Litros mañana", 0.0, 50.0, 10.0)
+                    litros_tarde = st.number_input("Litros tarde", 0.0, 50.0, 5.0)
+                obs_l = st.text_area("Observaciones")
+                if st.form_submit_button("Registrar"):
+                    total = litros_manana + litros_tarde
+                    run_query("INSERT INTO produccion_leche (caravana, fecha, litros_manana, litros_tarde, litros_total, observaciones) VALUES (?, ?, ?, ?, ?, ?)",
+                             (car_l, fecha_l, litros_manana, litros_tarde, total, obs_l))
+                    st.success(f"{total:.1f} litros registrados.")
+        with tab_l2:
+            df_leche = fetch_data("""
+                SELECT fecha, caravana, litros_manana, litros_tarde, litros_total
+                FROM produccion_leche ORDER BY fecha DESC LIMIT 100
+            """)
+            st.dataframe(df_leche, width=1200, hide_index=True)
+        with tab_l3:
+            df_stats = fetch_data("""
+                SELECT caravana, AVG(litros_total) as promedio, SUM(litros_total) as total, COUNT(*) as dias
+                FROM produccion_leche GROUP BY caravana ORDER BY promedio DESC
+            """)
+            if not df_stats.empty:
+                total_gral = df_stats['total'].sum()
+                prom_gral = df_stats['promedio'].mean()
+                c1, c2 = st.columns(2)
+                c1.metric("Total producido", f"{total_gral:.1f} L")
+                c2.metric("Promedio diario", f"{prom_gral:.1f} L")
+                st.dataframe(df_stats, width=1200, hide_index=True)
+                st.markdown("### Produccion por dia")
+                df_diario = fetch_data("SELECT fecha, SUM(litros_total) as total FROM produccion_leche GROUP BY fecha ORDER BY fecha")
+                if not df_diario.empty:
+                    st.line_chart(df_diario.set_index('fecha'), color="#2dd4bf")
+    else:
+        st.warning("No hay hembras registradas.")
 
 # ====================== PRODUCCION ======================
 elif menu == "Produccion y Pesajes":
